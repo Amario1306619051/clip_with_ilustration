@@ -3,6 +3,12 @@ uvicorn[standard]>=0.27
 pydantic>=2.6
 yt-dlp>=2026.5.0
 yt-dlp-ejs>=0.8        # JS challenge solver scripts for YouTube n-param
+# torch is pulled by openai-whisper. Pin the CUDA 12.8 build so a clean install
+# matches the NVIDIA driver (else pip may grab a cu13 build that can't see the GPU
+# → Whisper silently runs on CPU). On non-NVIDIA / other-CUDA hosts, drop the two
+# lines below and let pip resolve torch normally.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.11.0+cu128
 openai-whisper>=20231117
 ffmpeg-python>=0.2.0
 python-multipart>=0.0.9

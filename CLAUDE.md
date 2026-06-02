@@ -134,6 +134,15 @@ illustrator/
   (form Step 1) = hint opsional, BUKAN syarat — user gak perlu isi. Catatan: query tetap
   dibuat per-window, jadi window yang teksnya sendiri off-topic (mis. narator nyeletuk
   "ngopi di warung") bisa ikut literal — tweak via durasi segmen / "↻ cari ulang" di UI.
+- **Whisper / GPU (fix 2026-06)**: `transcriber.py` auto-pakai **CUDA** kalau ada GPU,
+  default model **`medium` di GPU / `base` di CPU**. Env: `WHISPER_MODEL` + `WHISPER_LANGUAGE`
+  (dibaca dari `.env` via `_load_dotenv()` transcriber sendiri — gak butuh `config.py`, gak
+  bergantung urutan import). `.env` set `WHISPER_LANGUAGE=id`. `condition_on_previous_text=False`
+  (anti repeat/halusinasi). **Model di-load per call & VRAM dibebasin abis transcribe**
+  (`del`+`empty_cache`) biar render NVENC dapet GPU penuh; OOM CUDA → fallback CPU. **GPU gotcha:**
+  build `torch` HARUS cocok versi CUDA driver (driver di sini = 12.8 → butuh `cu12x`), kalau
+  nggak `cuda.is_available()` diam-diam `False` → Whisper jalan di CPU (lambat). `requirements.txt`
+  pin `torch==2.11.0+cu128` + index cu128 buat nyegah ini.
 - **ffmpeg image inputs**: tiap window = 1 input `-loop 1 -t dur`. Base hitam pakai
   `d=dur` + `vstack shortest=1` biar output gak infinite (looped image itu infinite).
 - **Box free-form + render-area guide** (sama konsep kaya clipper) — box bebas ukuran; `drawOverlay` nampilin guide: mode COVER nge-dim margin yang kepotong + outline sub-rect 3:2 yang ke-render (`coverKeepRect`), mode BLUR_PAD seluruh box ke-render (gak ada crop). (Sempet di-lock ke 3:2, tapi owner mau ukuran bebas + nunjuk blur udah nampilin box utuh — jadi di-revert ke free-form + guide.)

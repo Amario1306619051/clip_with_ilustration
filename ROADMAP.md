@@ -50,7 +50,12 @@ A **"Generate Thumbnail"** button that produces a cover IMAGE for the clip:
 
 ## Transcription accuracy (Whisper) — "voicenya kurang akurat"
 
-**Status:** planned (shared issue dengan clipper — `transcriber.py` identik)
+**Status:** ✅ sebagian besar DONE 2026-06 (shared dengan clipper — `transcriber.py` identik).
+Dikerjain: GPU auto (torch di-fix ke `cu128` biar 4050 kepakai), default model **medium** di GPU,
+`WHISPER_LANGUAGE=id`, `condition_on_previous_text=False`, VRAM dibebasin abis transcribe + fallback
+CPU pas OOM. **Sisa (stretch):** `large-v3` (butuh >6GB VRAM / faster-whisper int8) buat akurasi
+maksimal, dan `initial_prompt` dari judul/topik (param-nya udah ada, tinggal di-plumb ke
+`/api/transcribe`).
 
 **Why**
 
