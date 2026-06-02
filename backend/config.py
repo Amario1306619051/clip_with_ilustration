@@ -27,8 +27,8 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 # ===== vLLM (OpenAI-compatible) — same names as email_categorizer =====
-VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "https://internal-rnd.balitower.co.id/model")
-VLLM_MODEL = os.getenv("VLLM_MODEL", "gb10-qwen35-122b-a10b-fp8-4node-100k")
+VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "https://internal-rnd.balitower.co.id/models/qwen35")
+VLLM_MODEL = os.getenv("VLLM_MODEL", "gb10-qwen35-122b-nvfp4-4node-100k")
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "dummy")
 
 # ===== Pexels (stock photo search) =====

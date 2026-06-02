@@ -48,6 +48,53 @@ A **"Generate Thumbnail"** button that produces a cover IMAGE for the clip:
 
 ---
 
+## Transcription accuracy (Whisper) — "voicenya kurang akurat"
+
+**Status:** planned (shared issue dengan clipper — `transcriber.py` identik)
+
+**Why**
+
+Whisper sering salah dengar, terutama **bahasa Indonesia** + **nama/istilah khusus** (nama
+orang, tempat, istilah agama). Di illustrator efeknya **berlipat**: transcript salah →
+`llm.queries_for_segments` dapet konteks salah → query Pexels meleset → ilustrasi nyasar.
+Jadi akurasi voice itu fondasi seluruh pipeline ilustrasi, bukan cuma caption.
+
+**Root cause** (`backend/transcriber.py`)
+
+1. Model **hardcoded `base`** — tier terkecil, paling lemah buat non-English.
+2. **Tanpa `language` hint** — `transcribe()` auto-detect; gampang meleset / code-switch di
+   konten ID (apalagi yang nyelipin kutipan Arab).
+3. **Tanpa `initial_prompt`** — nama diri / istilah domain (mis. "Ad-Duha", "Al-Insyirah",
+   "Quraisy") gak ke-bias → sering salah eja.
+4. **Gak bisa diatur via env** — ganti model = edit kode.
+5. `condition_on_previous_text=True` (default) — bisa repetition/halusinasi pas musik/hening.
+
+**Proposed**
+
+- `WHISPER_MODEL` env (default naikin ke `small`/`medium`; `large-v3` kalau ada GPU).
+- `WHISPER_LANGUAGE` env (mis. `id`) → `transcribe(language=...)`, dengan override.
+- `initial_prompt` opsional buat nge-bias kosakata. illustrator **udah punya** title +
+  description (dikumpulin di `/api/download`) — tinggal di-plumb ke `/api/transcribe` →
+  `transcriber.transcribe(initial_prompt=...)` biar nama diri konsisten.
+- Set `condition_on_previous_text=False` (atau expose) buat ngurangin loop/halusinasi.
+- **(Stretch, butuh approval)** swap ke `faster-whisper` (CTranslate2): jauh lebih cepat +
+  akurat + VAD bawaan. Ini **ganti tech / dep baru** → approval owner dulu.
+
+**Implementation notes**
+
+- `transcriber.py` **identik di clipper & illustrator** → ubah sekali, mirror ke satu lagi.
+- `get_model` di-`lru_cache` by name — aman buat swap ukuran model.
+- `/api/transcribe` sekarang cuma terima `job_id`; buat `initial_prompt` perlu nyimpen/teruskan
+  title+description (mirip pola yang dipakai buat konteks LLM).
+- Model lebih gede = lebih lambat di CPU → tradeoff latency.
+
+**Acceptance**
+
+- Speech ID + nama diri ke-transcribe cukup bener sampai query LLM nyambung & caption kebaca
+  benar; minim kata ngawur / repetisi.
+
+---
+
 ## (placeholder for future items)
 
 When this project gets a GitHub repo, move these into Issues and keep this file as

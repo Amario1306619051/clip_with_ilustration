@@ -44,6 +44,8 @@ Job state = filesystem in `temp/` keyed by 12-char hex `job_id`.
 3. **Ilustrasi** — `/api/plan`:
    - `illustrator.segment_clip()` potong [0,duration] jadi window N-detik + ambil teks transcript per window.
    - `llm.queries_for_segments()` (vLLM batch) → 1 English search query per window.
+     **Title+description video dikirim sebagai konteks global** biar tiap query
+     nempel ke tema video, gak loncat ke kata literal per window (lihat Gotchas).
    - `illustrator.search_pexels()` → kandidat gambar (URL doang, di-cache per query).
    - UI render grid kandidat, user klik pilih 1 per segmen. Kandidat #1 auto-kepilih.
 4. **Render** — `/api/render`:
@@ -95,7 +97,7 @@ illustrator/
 |---|---|---|---|
 | POST | `/api/download` | `{url,start,end,title,description}` | `{job_id,video_path,duration,width,height}` |
 | POST | `/api/transcribe` | `{job_id}` | `{words:[{word,start,end}]}` |
-| POST | `/api/plan` | `{job_id,words,segment_seconds,duration}` | `{segments:[{idx,t_start,t_end,text,query,candidates}]}` |
+| POST | `/api/plan` | `{job_id,words,segment_seconds,duration,title,description}` | `{segments:[{idx,t_start,t_end,text,query,candidates}]}` |
 | POST | `/api/search` | `{query}` | `{candidates:[{id,thumb,full,alt,photographer}]}` |
 | POST | `/api/render` | `{job_id,title,box,illustrations,words,caption_font,caption_size,cleanup,render_start,render_end}` | `{output_path,filename}` |
 | POST | `/api/cleanup` | `{job_id}` | `{ok:true}` |
@@ -111,8 +113,27 @@ illustrator/
   baca via `BASE_DIR = parent.parent`.
 - **Pexels key wajib** buat dapet kandidat. Tanpa key, `search_pexels` balikin `[]`
   (UI nampilin "ga ada hasil"), render tetap jalan tapi slot bawah hitam.
-- **vLLM bisa down / Qwen `<think>`**: `llm.queries_for_segments` strip `<think>` dan
-  punya fallback (keyword dari snippet) — pipeline gak pernah hard-stop.
+- **vLLM endpoint (PENTING)**: base URL = `.../models/qwen35` (BUKAN `.../model` — yang
+  itu bisa nge-list model tapi completions-nya 504), model = `gb10-qwen35-122b-nvfp4-4node-100k`.
+  Salah satu dari dua ini bikin tiap call gagal → semua query jatuh ke fallback (keyword
+  mentah) → ilustrasi melenceng. `config.py` baca `.env` **sekali pas startup** → ganti
+  `.env` WAJIB restart server.
+- **Qwen3 = reasoning model → MATIKAN thinking**: kalau thinking ON, model emit `<think>`
+  panjang (bermenit-menit) → nginx 504. `_chat` kirim `extra_body={"chat_template_kwargs":
+  {"enable_thinking": False}}` → call jadi ~1-3s. `_strip_thinking` tetap ada (jaga-jaga).
+  Client `timeout=90`, `max_tokens=2000`.
+- **Cold-start 504**: request pertama setelah idle 504 (~60s) sambil model 122B di-load
+  ke GPU, tapi request itu yang nge-warm-in. `_chat` retry `_MAX_ATTEMPTS=3` → biasanya
+  attempt ke-2/3 kena model warm. Tetap fallback graceful kalau semua gagal — generate
+  ulang pas warm = instan.
+- **Topik diambil AUTO dari transcript penuh (fix 2026-06)**: dulu LLM cuma lihat snippet
+  per-window → query literal & loncat-loncat. Sekarang `illustrator.plan` gabungin SEMUA
+  kata jadi `full_transcript` (cap 8000 char) → `llm.queries_for_segments` sebagai konteks
+  global; system prompt: infer topik dari transcript lalu **anchor tiap query ke topik itu**
+  + imagery representatif/sopan buat topik abstrak/religi/historis. `title`/`description`
+  (form Step 1) = hint opsional, BUKAN syarat — user gak perlu isi. Catatan: query tetap
+  dibuat per-window, jadi window yang teksnya sendiri off-topic (mis. narator nyeletuk
+  "ngopi di warung") bisa ikut literal — tweak via durasi segmen / "↻ cari ulang" di UI.
 - **ffmpeg image inputs**: tiap window = 1 input `-loop 1 -t dur`. Base hitam pakai
   `d=dur` + `vstack shortest=1` biar output gak infinite (looped image itu infinite).
 - **Box free-form + render-area guide** (sama konsep kaya clipper) — box bebas ukuran; `drawOverlay` nampilin guide: mode COVER nge-dim margin yang kepotong + outline sub-rect 3:2 yang ke-render (`coverKeepRect`), mode BLUR_PAD seluruh box ke-render (gak ada crop). (Sempet di-lock ke 3:2, tapi owner mau ukuran bebas + nunjuk blur udah nampilin box utuh — jadi di-revert ke free-form + guide.)

@@ -92,10 +92,25 @@ def search_pexels(query: str, per_page: Optional[int] = None) -> list[dict]:
 
 # ───────────────────────── plan (segment + query + search) ─────────────────────────
 
-def plan(words: list[dict], duration: float, seg_seconds: float) -> list[dict]:
-    """Full plan: segments with queries and candidate images attached."""
+def plan(
+    words: list[dict],
+    duration: float,
+    seg_seconds: float,
+    title: str = "",
+    description: str = "",
+) -> list[dict]:
+    """Full plan: segments with queries and candidate images attached. The FULL
+    transcript (joined from all words) is passed to the LLM as global context so it
+    can infer the video's overall topic and anchor every per-window query to it
+    instead of chasing literal words. title/description are optional extra hints."""
     segments = segment_clip(words, duration, seg_seconds)
-    queries = llm.queries_for_segments([s["text"] for s in segments])
+    full_transcript = " ".join(w["word"] for w in words).strip()
+    queries = llm.queries_for_segments(
+        [s["text"] for s in segments],
+        title=title,
+        description=description,
+        full_transcript=full_transcript,
+    )
 
     # Cache searches by query so repeated topics don't re-hit the API.
     cache: dict[str, list[dict]] = {}

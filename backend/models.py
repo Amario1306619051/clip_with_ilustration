@@ -55,11 +55,15 @@ class TranscribeResponse(BaseModel):
 
 class PlanRequest(BaseModel):
     """Cut the clip into N-second segments, derive a stock-photo search query
-    per segment from the transcript, and fetch candidate images per segment."""
+    per segment from the transcript, and fetch candidate images per segment.
+    title/description = the video's overall topic, passed to the LLM as global
+    context so every query stays anchored to the theme (not literal words)."""
     job_id: str
     words: list[Word] = Field(default_factory=list)
     segment_seconds: float = 5.0
     duration: float  # clip duration in seconds (from /api/download)
+    title: str = ""
+    description: str = ""
 
 
 class Candidate(BaseModel):

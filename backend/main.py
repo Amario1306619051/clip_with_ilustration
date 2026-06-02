@@ -57,7 +57,10 @@ def api_plan(req: PlanRequest):
     (vLLM), and fetch candidate stock images per window (URLs only)."""
     try:
         words = [w.model_dump() for w in req.words]
-        segments = illustrator.plan(words, req.duration, req.segment_seconds)
+        segments = illustrator.plan(
+            words, req.duration, req.segment_seconds,
+            title=req.title, description=req.description,
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"segments": segments}

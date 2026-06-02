@@ -509,6 +509,9 @@ $('#btn-plan').addEventListener('click', async () => {
       words: state.words,
       segment_seconds: state.segSeconds,
       duration: video.duration || state.duration,
+      // overall video topic → LLM anchors every query to it (not literal words)
+      title: $('#f-title').value.trim() || 'clip',
+      description: $('#f-desc').value.trim(),
     });
     state.segments = (r.segments || []).map((s) => ({ ...s, picked: null, _img: null }));
     // auto-pick first candidate per segment (biar bisa langsung render)
