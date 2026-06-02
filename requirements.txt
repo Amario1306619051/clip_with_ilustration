@@ -1,0 +1,11 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+yt-dlp>=2026.5.0
+yt-dlp-ejs>=0.8        # JS challenge solver scripts for YouTube n-param
+openai-whisper>=20231117
+ffmpeg-python>=0.2.0
+python-multipart>=0.0.9
+secretstorage>=3.3     # Linux only — needed to read Chrome cookie store
+openai>=1.0            # vLLM client (OpenAI-compatible endpoint) for topic→query
+requests>=2.31         # Pexels search + downloading picked images
