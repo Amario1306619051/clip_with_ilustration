@@ -520,7 +520,7 @@ def render(
         )
         nxt = f"b{i}"
         parts.append(
-            f"[{last_bot}][ill{i}]overlay=enable='between(t,{_fmt_num(pick.t_start)},{_fmt_num(pick.t_end)})'[{nxt}]"
+            f"[{last_bot}][ill{i}]overlay=enable='between(t,{_fmt_num(pick.t_start)},{_fmt_num(pick.t_end)})':eof_action=pass[{nxt}]"
         )
         last_bot = nxt
     parts.append(f"[{last_bot}]null[bot]")
@@ -555,9 +555,16 @@ def render(
         *input_seek,
         "-i", str(source_path),
     ]
-    # Looped image inputs (bounded by -t dur so nothing runs forever).
-    for path, _pick in img_inputs:
-        cmd += ["-loop", "1", "-framerate", "30", "-t", f"{dur:.3f}", "-i", str(path)]
+    # Each picked image is fed ONLY for its own window (-itsoffset start + -t
+    # window) at a low framerate — it's a still, so it doesn't need 30fps across
+    # the whole clip. Old way (loop every image at 30fps over the full duration)
+    # scaled+overlaid each image ~N×full_duration frames; this is ~9x faster with
+    # identical output (overlay enable=between still gates the window; eof_action=
+    # pass lets the black base show before/after each image's window).
+    for path, pick in img_inputs:
+        win = max(0.1, float(pick.t_end) - float(pick.t_start))
+        cmd += ["-itsoffset", f"{float(pick.t_start):.3f}", "-loop", "1",
+                "-framerate", "2", "-t", f"{win:.3f}", "-i", str(path)]
 
     cmd += [
         "-filter_complex", filter_complex,
