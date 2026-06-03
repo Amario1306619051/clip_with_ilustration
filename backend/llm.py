@@ -33,7 +33,7 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 def _strip_thinking(s: str) -> str:
-    """Qwen3 sering output <think>...</think> dulu — buang block-nya."""
+    """Qwen3 often emits a <think>...</think> block first — strip it out."""
     return _THINK_RE.sub("", s)
 
 

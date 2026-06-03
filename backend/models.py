@@ -6,7 +6,7 @@ class Keyframe(BaseModel):
     """Single position/size sample for the TOP crop box at time `t` (seconds,
     relative to clip start). Same semantics as clipper's Keyframe.
       - interp: 'hold' (default) | 'linear'
-      - fit:    'cover' (default) | 'blur_pad'   ← the "blur atau engga" choice
+      - fit:    'cover' (default) | 'blur_pad'   ← the "blur or not" choice
       - gap:    True marks the segment as empty (black slot)
     """
     t: float = 0.0

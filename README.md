@@ -1,42 +1,42 @@
 # ILLUSTRATOR
 
-Bikin video vertikal 9:16 (TikTok/Shorts/Reels) dari YouTube — **slot atas = potongan
-video, slot bawah = ilustrasi (stock photo) yang dipilihin AI biar nyambung sama yang
-lagi diomongin**. Ganti tiap N detik. Caption word-by-word otomatis.
+Build 9:16 vertical videos (TikTok/Shorts/Reels) from YouTube — **top slot = a video
+clip, bottom slot = an AI-picked illustration (stock photo) that matches what's being
+discussed**. Changes every N seconds. Automatic word-by-word captions.
 
-Adik dari `../clipper`. Bedanya: clipper 2 box video, ini 1 box video + 1 track ilustrasi.
+Sibling of `../clipper`. The difference: clipper has 2 video boxes, this has 1 video box + 1 illustration track.
 
 ## Flow
 
-1. **Source** — paste URL YouTube + range waktu → download & trim.
-2. **Crop** — gambar 1 box buat slot atas. Bisa keyframe (pan) + pilih fit cover/blur per-segment.
-3. **Ilustrasi** — set durasi per gambar (N detik) → "Generate". AI (Whisper + LLM) baca
-   transcript tiap window, nyariin gambar nyambung di Pexels, kasih beberapa kandidat.
-   Klik buat milih satu per segmen (kandidat pertama auto-kepilih).
-4. **Render** — compose + burn caption → 1 file mp4 di `output/`.
+1. **Source** — paste a YouTube URL + a time range → download & trim.
+2. **Crop** — draw 1 box for the top slot. You can keyframe (pan) + choose a per-segment cover/blur fit.
+3. **Illustration** — set the duration per image (N seconds) → "Generate". The AI (Whisper + LLM) reads
+   the transcript for each window, finds matching images on Pexels, and offers a few candidates.
+   Click to pick one per segment (the first candidate is auto-selected).
+4. **Render** — compose + burn captions → 1 mp4 file in `output/`.
 
-## Hemat storage
+## Saving storage
 
-Kandidat gambar cuma URL — di-load langsung dari Pexels di browser, **gak disimpen di server**.
-Yang di-download cuma gambar yang kamu pilih, pas render, ukuran kecil (`portrait` ~800×1200),
-dan di-dedup (window yang pake gambar sama share 1 file). Semua kehapus pas "Done · clean up".
+Image candidates are only URLs — loaded directly from Pexels in the browser, **not stored on the server**.
+Only the images you pick get downloaded, at render time, at a small size (`portrait` ~800×1200),
+and deduped (windows that use the same image share 1 file). Everything is deleted on "Done · clean up".
 
 ---
 
-# Cara jalanin (lengkap, step-by-step)
+# How to run it (full step-by-step)
 
-## 0. Prasyarat — install dulu di komputer
+## 0. Prerequisites — install these on your computer first
 
-Tool ini butuh 3 program di luar Python. Cek dulu udah ada belum:
+This tool needs 3 programs outside of Python. Check whether you already have them:
 
 ```bash
 ffmpeg -version
 ffprobe -version
 node -v
-python3 --version    # butuh 3.10+
+python3 --version    # needs 3.10+
 ```
 
-Kalau ada yang `command not found`, install dulu:
+If any of them say `command not found`, install them first:
 
 **Linux (Debian/Ubuntu)**
 ```bash
@@ -44,21 +44,21 @@ sudo apt update
 sudo apt install -y ffmpeg nodejs python3 python3-venv
 ```
 
-**macOS (pakai Homebrew)**
+**macOS (using Homebrew)**
 ```bash
 brew install ffmpeg node python
 ```
 
 **Windows**
-- ffmpeg: download dari https://www.gyan.dev/ffmpeg/builds/ → ekstrak → tambahin folder `bin/` ke PATH.
-- node: download dari https://nodejs.org → install (next-next-finish).
-- python: download dari https://python.org → install, centang **"Add Python to PATH"**.
+- ffmpeg: download from https://www.gyan.dev/ffmpeg/builds/ → extract → add the `bin/` folder to PATH.
+- node: download from https://nodejs.org → install (next-next-finish).
+- python: download from https://python.org → install, check **"Add Python to PATH"**.
 
-> `node` dibutuhin yt-dlp buat mecahin "n-challenge"-nya YouTube. Tanpa node, download bisa cuma dapet gambar storyboard.
+> `node` is needed by yt-dlp to solve YouTube's "n-challenge". Without node, a download may only get storyboard images.
 
-## 1. Bikin virtual env + install dependency Python
+## 1. Create a virtual env + install Python dependencies
 
-Dari dalam folder `illustrator/`:
+From inside the `illustrator/` folder:
 
 ```bash
 cd illustrator
@@ -70,90 +70,90 @@ pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-> Pertama kali bakal agak lama — `openai-whisper` narik PyTorch yang gede.
+> The first time takes a while — `openai-whisper` pulls in a large PyTorch.
 
-## 2. Dapetin Pexels API key (gratis)
+## 2. Get a Pexels API key (free)
 
-Ini buat nyari gambar ilustrasi.
+This is for searching illustration images.
 
-1. Buka https://www.pexels.com/api/ → klik **"Get Started"**.
-2. **Login / daftar** akun Pexels (bisa pakai Google/email).
-3. Isi form singkat:
-   - *What are you building?* → isi bebas, misal **"Personal video tool"**.
-   - *Description* → misal **"App bikin video pendek + ilustrasi otomatis"**.
-   - Centang agree to terms.
-4. Klik **Generate API Key** → key langsung muncul di dashboard (https://www.pexels.com/api/new/).
-   Bentuknya string panjang, contoh `563492ad6f917000010000019xxxxxxxxxxxxx`.
-5. Copy key-nya (nanti ditempel di step 4).
+1. Open https://www.pexels.com/api/ → click **"Get Started"**.
+2. **Log in / sign up** for a Pexels account (you can use Google/email).
+3. Fill in the short form:
+   - *What are you building?* → anything, e.g. **"Personal video tool"**.
+   - *Description* → e.g. **"App that makes short videos + automatic illustrations"**.
+   - Check agree to terms.
+4. Click **Generate API Key** → the key appears immediately in the dashboard (https://www.pexels.com/api/new/).
+   It's a long string, e.g. `563492ad6f917000010000019xxxxxxxxxxxxx`.
+5. Copy the key (you'll paste it in step 4).
 
-> Gratis: **200 request/jam**, **20.000/bulan** — lebih dari cukup. Wajib kasih attribution
-> ke Pexels kalau video-nya dipublish (nama fotografer udah ke-track otomatis).
+> Free tier: **200 requests/hour**, **20,000/month** — more than enough. You must give attribution
+> to Pexels if you publish the video (the photographer's name is tracked automatically).
 
-## 3. Siapin akses LLM (vLLM internal)
+## 3. Set up LLM access (internal vLLM)
 
-Pakai endpoint vLLM internal yang sama kaya `email_categorizer` — buat nerjemahin
-topik tiap segmen jadi keyword pencarian gambar. Yang kamu butuh cuma **`VLLM_API_KEY`**-nya
-(base URL + model udah ada default-nya). Ambil dari `email_categorizer/.env` punya kamu.
+Use the same internal vLLM endpoint as `email_categorizer` — to translate each segment's
+topic into image search keywords. All you need is its **`VLLM_API_KEY`**
+(the base URL + model already have defaults). Grab it from your own `email_categorizer/.env`.
 
-## 4. Isi file `.env`
+## 4. Fill in the `.env` file
 
 ```bash
 cp .env.example .env
 ```
 
-Buka `.env`, isi 2 baris ini (sisanya boleh dibiarin default):
+Open `.env` and fill in these 2 lines (the rest can be left at the defaults):
 
 ```ini
-VLLM_API_KEY=<key vLLM dari email_categorizer>
-PEXELS_API_KEY=<key Pexels dari step 2>
+VLLM_API_KEY=<vLLM key from email_categorizer>
+PEXELS_API_KEY=<Pexels key from step 2>
 ```
 
-## 5. Jalanin servernya
+## 5. Run the server
 
 ```bash
 cd backend
 python main.py
 ```
 
-Kalau sukses bakal muncul `Uvicorn running on http://127.0.0.1:8000`.
-Buka **http://127.0.0.1:8000** di browser.
+If it works, you'll see `Uvicorn running on http://127.0.0.1:8000`.
+Open **http://127.0.0.1:8000** in your browser.
 
-> Hentiin server: `Ctrl + C`. Tiap mau jalanin lagi, aktifin venv dulu
-> (`source venv/bin/activate`), terus `cd backend && python main.py`.
+> Stop the server: `Ctrl + C`. Each time you want to run it again, activate the venv first
+> (`source venv/bin/activate`), then `cd backend && python main.py`.
 
-## 6. Cara pakai di browser (4 langkah)
+## 6. How to use it in the browser (4 steps)
 
-1. **Source** — paste URL YouTube, isi Start/End (kosongin End = sampe abis), klik **Download & Trim**.
-2. **Crop** — klik pill **"Crop box"** (atau pencet `1`) buat ngaktifin canvas → drag di video
-   buat bikin box (slot atas). Mau pan? scrub ke waktu lain, drag lagi = keyframe baru.
-   Tiap segment row bisa di-toggle **HOLD↔PAN** dan **COVER↔BLUR**. Klik **Transcribe & Continue**.
-3. **Ilustrasi** — set **durasi per ilustrasi** (detik), klik **Generate ilustrasi**.
-   Tiap segmen muncul barisan kandidat gambar → klik buat milih (kandidat #1 auto-kepilih).
-   Keyword kurang pas? edit di kotak query → **cari ulang**. Klik **Continue**.
-4. **Render** — atur caption font/size (atau render range kalau mau dipotong lagi) →
-   **Render Final (with Caption)**. Hasilnya muncul + tombol download. Klik
-   **Done · clean up source** kalau udah, biar temp kehapus.
+1. **Source** — paste a YouTube URL, fill in Start/End (leave End empty = to the end), click **Download & Trim**.
+2. **Crop** — click the **"Crop box"** pill (or press `1`) to activate the canvas → drag on the video
+   to create a box (top slot). Want to pan? Scrub to another time and drag again = a new keyframe.
+   Each segment row can be toggled **HOLD↔PAN** and **COVER↔BLUR**. Click **Transcribe & Continue**.
+3. **Illustration** — set the **duration per illustration** (seconds), click **Generate illustration**.
+   A row of image candidates appears for each segment → click to pick one (candidate #1 is auto-selected).
+   Keywords not quite right? Edit them in the query box → **search again**. Click **Continue**.
+4. **Render** — set the caption font/size (or a render range if you want to trim further) →
+   **Render Final (with Caption)**. The result appears + a download button. Click
+   **Done · clean up source** when you're done, to delete the temp files.
 
-Output ada di `illustrator/output/*.mp4`.
+Output is in `illustrator/output/*.mp4`.
 
 ---
 
 ## Troubleshooting
 
-| Masalah | Solusi |
+| Problem | Solution |
 |---|---|
-| Download gagal / "Sign in to confirm you're not a bot" | Login YouTube di Chrome/Firefox sekali, atau set `ILLUSTRATOR_COOKIES_BROWSER=firefox`, atau export `cookies.txt` (Netscape) ke `illustrator/cookies.txt`. |
-| Slot bawah hitam pas render | `PEXELS_API_KEY` belum diisi / salah. Render tetap jalan, cuma tanpa ilustrasi. |
-| Kandidat gambar kosong di Step 3 | Cek key Pexels, atau edit keyword-nya terus "cari ulang". |
-| Transcribe lama banget | Normal pas pertama — Whisper download + load model. Berikutnya cepet. |
-| Caption Indonesia kurang akurat | Ganti model di `backend/transcriber.py`: `get_model("base")` → `"small"`/`"medium"`. |
-| Render lambat | Kalau ada GPU NVIDIA, NVENC kepake otomatis. Paksa CPU: `ILLUSTRATOR_ENCODER=libx264`. |
-| Port 8000 kepake | Edit port di baris terakhir `backend/main.py`. |
+| Download fails / "Sign in to confirm you're not a bot" | Log in to YouTube in Chrome/Firefox once, or set `ILLUSTRATOR_COOKIES_BROWSER=firefox`, or export `cookies.txt` (Netscape) to `illustrator/cookies.txt`. |
+| Bottom slot is black on render | `PEXELS_API_KEY` is unset / wrong. Render still runs, just without illustrations. |
+| Image candidates empty in Step 3 | Check the Pexels key, or edit the keywords and "search again". |
+| Transcribe takes forever | Normal on the first run — Whisper downloads + loads the model. It's fast after that. |
+| Indonesian captions not accurate enough | Change the model in `backend/transcriber.py`: `get_model("base")` → `"small"`/`"medium"`. |
+| Render is slow | If you have an NVIDIA GPU, NVENC is used automatically. Force CPU: `ILLUSTRATOR_ENCODER=libx264`. |
+| Port 8000 in use | Edit the port on the last line of `backend/main.py`. |
 
-## Catatan teknis
+## Technical notes
 
-- Tanpa `PEXELS_API_KEY`, slot bawah bakal kosong (hitam) — render tetap jalan.
-- LLM Qwen kadang lemot/`<think>` — ada fallback keyword, jadi gak pernah macet total.
-- Whisper default model `base` (mediocre buat Indonesia) — ganti di `backend/transcriber.py`.
-- GPU NVENC kepake otomatis kalo ada; paksa CPU: `ILLUSTRATOR_ENCODER=libx264`.
-- Detail arsitektur lengkap: lihat [CLAUDE.md](CLAUDE.md).
+- Without `PEXELS_API_KEY`, the bottom slot will be empty (black) — render still runs.
+- The Qwen LLM is sometimes slow/`<think>` — there's a keyword fallback, so it never gets fully stuck.
+- Whisper's default model is `base` (mediocre for Indonesian) — change it in `backend/transcriber.py`.
+- GPU NVENC is used automatically if available; force CPU: `ILLUSTRATOR_ENCODER=libx264`.
+- For full architecture details: see [CLAUDE.md](CLAUDE.md).

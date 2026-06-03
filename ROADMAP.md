@@ -48,55 +48,55 @@ A **"Generate Thumbnail"** button that produces a cover IMAGE for the clip:
 
 ---
 
-## Transcription accuracy (Whisper) — "voicenya kurang akurat"
+## Transcription accuracy (Whisper) — "the voice isn't accurate enough"
 
-**Status:** ✅ sebagian besar DONE 2026-06 (shared dengan clipper — `transcriber.py` identik).
-Dikerjain: GPU auto (torch di-fix ke `cu128` biar 4050 kepakai), default model **medium** di GPU,
-`WHISPER_LANGUAGE=id`, `condition_on_previous_text=False`, VRAM dibebasin abis transcribe + fallback
-CPU pas OOM. **Sisa (stretch):** `large-v3` (butuh >6GB VRAM / faster-whisper int8) buat akurasi
-maksimal, dan `initial_prompt` dari judul/topik (param-nya udah ada, tinggal di-plumb ke
-`/api/transcribe`).
+**Status:** ✅ mostly DONE 2026-06 (shared with clipper — `transcriber.py` is identical).
+Done: GPU auto (torch fixed to `cu128` so the 4050 gets used), default model **medium** on GPU,
+`WHISPER_LANGUAGE=id`, `condition_on_previous_text=False`, VRAM freed after transcribing + CPU
+fallback on OOM. **Remaining (stretch):** `large-v3` (needs >6GB VRAM / faster-whisper int8) for
+maximum accuracy, and `initial_prompt` from the title/topic (the param already exists, just needs
+to be plumbed into `/api/transcribe`).
 
 **Why**
 
-Whisper sering salah dengar, terutama **bahasa Indonesia** + **nama/istilah khusus** (nama
-orang, tempat, istilah agama). Di illustrator efeknya **berlipat**: transcript salah →
-`llm.queries_for_segments` dapet konteks salah → query Pexels meleset → ilustrasi nyasar.
-Jadi akurasi voice itu fondasi seluruh pipeline ilustrasi, bukan cuma caption.
+Whisper often mishears, especially **Indonesian** + **specific names/terms** (people's
+names, places, religious terms). In illustrator the effect is **compounded**: a wrong transcript →
+`llm.queries_for_segments` gets the wrong context → the Pexels query misses → the illustration goes astray.
+So voice accuracy is the foundation of the entire illustration pipeline, not just the captions.
 
 **Root cause** (`backend/transcriber.py`)
 
-1. Model **hardcoded `base`** — tier terkecil, paling lemah buat non-English.
-2. **Tanpa `language` hint** — `transcribe()` auto-detect; gampang meleset / code-switch di
-   konten ID (apalagi yang nyelipin kutipan Arab).
-3. **Tanpa `initial_prompt`** — nama diri / istilah domain (mis. "Ad-Duha", "Al-Insyirah",
-   "Quraisy") gak ke-bias → sering salah eja.
-4. **Gak bisa diatur via env** — ganti model = edit kode.
-5. `condition_on_previous_text=True` (default) — bisa repetition/halusinasi pas musik/hening.
+1. Model **hardcoded to `base`** — the smallest tier, weakest for non-English.
+2. **No `language` hint** — `transcribe()` auto-detects; easily misses / code-switches on
+   ID content (especially when Arabic quotes are mixed in).
+3. **No `initial_prompt`** — proper names / domain terms (e.g. "Ad-Duha", "Al-Insyirah",
+   "Quraisy") aren't biased → often misspelled.
+4. **Not configurable via env** — changing the model = editing the code.
+5. `condition_on_previous_text=True` (default) — can cause repetition/hallucination during music/silence.
 
 **Proposed**
 
-- `WHISPER_MODEL` env (default naikin ke `small`/`medium`; `large-v3` kalau ada GPU).
-- `WHISPER_LANGUAGE` env (mis. `id`) → `transcribe(language=...)`, dengan override.
-- `initial_prompt` opsional buat nge-bias kosakata. illustrator **udah punya** title +
-  description (dikumpulin di `/api/download`) — tinggal di-plumb ke `/api/transcribe` →
-  `transcriber.transcribe(initial_prompt=...)` biar nama diri konsisten.
-- Set `condition_on_previous_text=False` (atau expose) buat ngurangin loop/halusinasi.
-- **(Stretch, butuh approval)** swap ke `faster-whisper` (CTranslate2): jauh lebih cepat +
-  akurat + VAD bawaan. Ini **ganti tech / dep baru** → approval owner dulu.
+- `WHISPER_MODEL` env (raise the default to `small`/`medium`; `large-v3` if a GPU is available).
+- `WHISPER_LANGUAGE` env (e.g. `id`) → `transcribe(language=...)`, with override.
+- Optional `initial_prompt` to bias the vocabulary. illustrator **already has** the title +
+  description (collected in `/api/download`) — it just needs to be plumbed into `/api/transcribe` →
+  `transcriber.transcribe(initial_prompt=...)` to keep proper names consistent.
+- Set `condition_on_previous_text=False` (or expose it) to reduce loops/hallucination.
+- **(Stretch, needs approval)** swap to `faster-whisper` (CTranslate2): much faster +
+  more accurate + built-in VAD. This is a **tech change / new dependency** → owner approval first.
 
 **Implementation notes**
 
-- `transcriber.py` **identik di clipper & illustrator** → ubah sekali, mirror ke satu lagi.
-- `get_model` di-`lru_cache` by name — aman buat swap ukuran model.
-- `/api/transcribe` sekarang cuma terima `job_id`; buat `initial_prompt` perlu nyimpen/teruskan
-  title+description (mirip pola yang dipakai buat konteks LLM).
-- Model lebih gede = lebih lambat di CPU → tradeoff latency.
+- `transcriber.py` is **identical in clipper & illustrator** → change it once, mirror to the other.
+- `get_model` is `lru_cache`d by name — safe for swapping the model size.
+- `/api/transcribe` currently only takes `job_id`; for `initial_prompt` it needs to store/forward
+  the title+description (similar to the pattern used for the LLM context).
+- A bigger model = slower on CPU → a latency tradeoff.
 
 **Acceptance**
 
-- Speech ID + nama diri ke-transcribe cukup bener sampai query LLM nyambung & caption kebaca
-  benar; minim kata ngawur / repetisi.
+- ID speech + proper names are transcribed accurately enough that the LLM query connects & the captions read
+  correctly; minimal garbage words / repetition.
 
 ---
 

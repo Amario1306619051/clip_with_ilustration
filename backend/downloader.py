@@ -103,9 +103,9 @@ def download(url: str, start: str, end: Optional[str], title: str) -> dict:
             raise RuntimeError(
                 f"YouTube anti-bot. Tried {cookies_source}. "
                 f"Fix options:\n"
-                f"  1. Login YouTube di Chrome/Firefox sekali, lalu re-try.\n"
-                f"  2. Set ILLUSTRATOR_COOKIES_BROWSER=firefox (or chrome/brave/edge) sebelum jalanin server.\n"
-                f"  3. Export cookies.txt (Netscape format, pake browser extension) ke {COOKIES_FILE}\n"
+                f"  1. Log in to YouTube in Chrome/Firefox once, then re-try.\n"
+                f"  2. Set ILLUSTRATOR_COOKIES_BROWSER=firefox (or chrome/brave/edge) before starting the server.\n"
+                f"  3. Export cookies.txt (Netscape format, via a browser extension) to {COOKIES_FILE}\n"
                 f"Original error: {msg}"
             )
         raise

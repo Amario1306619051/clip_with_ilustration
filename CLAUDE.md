@@ -4,24 +4,24 @@ Project context for Claude Code. Read fully before touching any file.
 
 ## Project: ILLUSTRATOR
 
-Sibling of `../clipper`. Bikin video vertikal 9:16 dari YouTube, tapi layout-nya:
-**slot ATAS = crop video (1 box), slot BAWAH = ilustrasi yang dipilih AI** (stock
-photo dari Pexels) yang nyambung sama topik yang lagi diomongin. Ilustrasi ganti
-tiap N detik. Caption word-by-word ala TikTok tetap ada.
+Sibling of `../clipper`. Builds 9:16 vertical videos from YouTube, but with this
+layout: **TOP slot = cropped video (1 box), BOTTOM slot = AI-picked illustration**
+(stock photo from Pexels) that matches the topic being discussed. The illustration
+changes every N seconds. TikTok-style word-by-word captions are still present.
 
-**Language**: Codebase English. Komentar UI & dokumentasi user-facing pakai
-bahasa Indonesia campur English (gaya owner). Jangan terjemahin string UI.
+**Language**: English everywhere. The codebase, code comments, documentation, and
+UI strings are all in English.
 
-## Beda utama dari clipper
+## Key differences from clipper
 
 | | clipper | illustrator |
 |---|---|---|
-| Box | 2 box (atas+bawah), keduanya crop video | **1 box** (atas only), bawah = ilustrasi |
-| Slot bawah | crop video kedua | gambar stock per N-detik window |
+| Box | 2 boxes (top+bottom), both crop video | **1 box** (top only), bottom = illustration |
+| Bottom slot | second video crop | stock image per N-second window |
 | AI | Whisper only | Whisper + **vLLM (topic→query)** + **Pexels search** |
-| Storage | simpan source video | + download HANYA gambar yang kepilih, deduped |
+| Storage | stores source video | + downloads ONLY the picked images, deduped |
 
-Layout terkunci sama kaya clipper: top 720 (3/8), bottom 1200 (5/8), caption di y=720.
+Layout is locked the same as clipper: top 720 (3/8), bottom 1200 (5/8), caption at y=720.
 
 ## Architecture
 
@@ -33,42 +33,42 @@ Layout terkunci sama kaya clipper: top 720 (3/8), bottom 1200 (5/8), caption di 
                      temp/{job_id}_ill_{hash}.jpg  (picked images, deleted on cleanup)
 ```
 
-4-step linear flow: **Source → Crop → Ilustrasi → Render**. No DB, no auth.
+4-step linear flow: **Source → Crop → Illustration → Render**. No DB, no auth.
 Job state = filesystem in `temp/` keyed by 12-char hex `job_id`.
 
-## Flow (penting)
+## Flow (important)
 
 1. **Source** — URL + range → yt-dlp download + ffmpeg trim → `temp/{job_id}.mp4`.
-2. **Crop** — gambar 1 crop box buat slot atas. Keyframe + fit cover/blur per-segment
-   (mekanik persis clipper, tapi single box).
-3. **Ilustrasi** — `/api/plan`:
-   - `illustrator.segment_clip()` potong [0,duration] jadi window N-detik + ambil teks transcript per window.
+2. **Crop** — draw 1 crop box for the top slot. Keyframe + per-segment cover/blur fit
+   (same mechanics as clipper, but a single box).
+3. **Illustration** — `/api/plan`:
+   - `illustrator.segment_clip()` splits [0,duration] into N-second windows + pulls the transcript text per window.
    - `llm.queries_for_segments()` (vLLM batch) → 1 English search query per window.
-     **Title+description video dikirim sebagai konteks global** biar tiap query
-     nempel ke tema video, gak loncat ke kata literal per window (lihat Gotchas).
-   - `illustrator.search_pexels()` → kandidat gambar (URL doang, di-cache per query).
-   - UI render grid kandidat, user klik pilih 1 per segmen. Kandidat #1 auto-kepilih.
+     **The video's title+description are sent as global context** so each query
+     sticks to the video's theme rather than jumping to literal per-window words (see Gotchas).
+   - `illustrator.search_pexels()` → image candidates (URLs only, cached per query).
+   - The UI renders a candidate grid; the user clicks to pick 1 per segment. Candidate #1 is auto-selected.
 4. **Render** — `/api/render`:
-   - Download HANYA gambar kepilih (`download_pick`, deduped by URL hash) ke temp/.
-   - ffmpeg: top = crop chain; bottom = black base + overlay tiap gambar `enable=between(t,t0,t1)`; vstack; burn caption.
+   - Download ONLY the picked images (`download_pick`, deduped by URL hash) into temp/.
+   - ffmpeg: top = crop chain; bottom = black base + overlay of each image `enable=between(t,t0,t1)`; vstack; burn caption.
 
-## Storage policy (requirement owner: "hemat storage")
+## Storage policy (owner requirement: "save storage")
 
-- Kandidat = URL Pexels, di-stream langsung browser. **Server gak pernah simpan kandidat.**
-- Cuma gambar yang **dipilih** yang di-download, dan baru pas render.
-- Pakai Pexels `portrait` (~800×1200) bukan `original` — file kecil, udah deket AR slot.
-- Dedup by URL: window yang pake gambar sama share 1 file di disk.
-- Cleanup hapus `temp/{job_id}*` (source + semua gambar).
+- Candidates = Pexels URLs, streamed directly to the browser. **The server never stores candidates.**
+- Only the **picked** images are downloaded, and only at render time.
+- Use Pexels `portrait` (~800×1200) instead of `original` — small files, already close to the slot AR.
+- Dedup by URL: windows that use the same image share 1 file on disk.
+- Cleanup deletes `temp/{job_id}*` (source + all images).
 
-## Tech stack (jangan swap tanpa approval)
+## Tech stack (don't swap without approval)
 
 Backend: Python 3.10+ — `fastapi`+`uvicorn`, `yt-dlp`(+`yt-dlp-ejs`), `openai-whisper`,
 `openai` (vLLM client), `requests` (Pexels), `pydantic` v2. ffmpeg via raw `subprocess`.
 Frontend: Vanilla HTML/CSS/JS, no framework, no build step.
-External: `ffmpeg`, `ffprobe`, JS runtime (node) on PATH untuk yt-dlp n-challenge.
+External: `ffmpeg`, `ffprobe`, JS runtime (node) on PATH for the yt-dlp n-challenge.
 
-LLM config = **var names sama persis kaya email_categorizer**: `VLLM_BASE_URL`,
-`VLLM_MODEL`, `VLLM_API_KEY`. Plus `PEXELS_API_KEY`. Loaded via `config.py` (baca `.env`).
+LLM config = **variable names exactly the same as email_categorizer**: `VLLM_BASE_URL`,
+`VLLM_MODEL`, `VLLM_API_KEY`. Plus `PEXELS_API_KEY`. Loaded via `config.py` (reads `.env`).
 
 ## File map
 
@@ -76,20 +76,20 @@ LLM config = **var names sama persis kaya email_categorizer**: `VLLM_BASE_URL`,
 illustrator/
 ├── backend/
 │   ├── main.py          FastAPI routes: download/transcribe/plan/search/render/cleanup
-│   ├── downloader.py    yt-dlp + trim (copy dari clipper; env ILLUSTRATOR_COOKIES_BROWSER)
-│   ├── transcriber.py   Whisper wrapper (copy dari clipper)
+│   ├── downloader.py    yt-dlp + trim (copied from clipper; env ILLUSTRATOR_COOKIES_BROWSER)
+│   ├── transcriber.py   Whisper wrapper (copied from clipper)
 │   ├── llm.py           vLLM client — transcript snippet → English stock query (batch)
 │   ├── illustrator.py   segment_clip / search_pexels / plan / download_pick
 │   ├── renderer.py      ffmpeg: top crop + bottom illustration track + caption
-│   ├── config.py        env loader — baca illustrator/.env (BASE_DIR = parent.parent)
+│   ├── config.py        env loader — reads illustrator/.env (BASE_DIR = parent.parent)
 │   └── models.py        Pydantic schemas
 ├── frontend/            index.html / style.css / app.js
 ├── temp/  output/
 ├── requirements.txt  .env.example  .gitignore
 ```
 
-`config.py` ada di `backend/` biar `llm.py`/`illustrator.py` bisa `import config`
-(backend/ yang on sys.path). `.env` sendiri di project root (`illustrator/.env`).
+`config.py` lives in `backend/` so `llm.py`/`illustrator.py` can `import config`
+(backend/ is on sys.path). `.env` itself sits in the project root (`illustrator/.env`).
 
 ## API contract
 
@@ -103,74 +103,74 @@ illustrator/
 | POST | `/api/cleanup` | `{job_id}` | `{ok:true}` |
 | GET | `/temp/{name}` / `/output/{name}` | — | mp4 |
 
-- `box` = list keyframe `{t,x,y,w,h,interp,fit,gap}` (source px). Sama semantik clipper.
-- `illustrations` = list `{t_start,t_end,url}` — `url` itu `full` dari kandidat kepilih.
+- `box` = list of keyframes `{t,x,y,w,h,interp,fit,gap}` (source px). Same semantics as clipper.
+- `illustrations` = list of `{t_start,t_end,url}` — `url` is the `full` URL of the picked candidate.
 
 ## Gotchas
 
-- **config.py di backend/**: `llm.py` & `illustrator.py` `import config`, jadi config.py
-  harus satu folder sama mereka (backend/, yang on sys.path). `.env` di root; config
-  baca via `BASE_DIR = parent.parent`.
-- **Pexels key wajib** buat dapet kandidat. Tanpa key, `search_pexels` balikin `[]`
-  (UI nampilin "ga ada hasil"), render tetap jalan tapi slot bawah hitam.
-- **vLLM endpoint (PENTING)**: base URL = `.../models/qwen35` (BUKAN `.../model` — yang
-  itu bisa nge-list model tapi completions-nya 504), model = `gb10-qwen35-122b-nvfp4-4node-100k`.
-  Salah satu dari dua ini bikin tiap call gagal → semua query jatuh ke fallback (keyword
-  mentah) → ilustrasi melenceng. `config.py` baca `.env` **sekali pas startup** → ganti
-  `.env` WAJIB restart server.
-- **Qwen3 = reasoning model → MATIKAN thinking**: kalau thinking ON, model emit `<think>`
-  panjang (bermenit-menit) → nginx 504. `_chat` kirim `extra_body={"chat_template_kwargs":
-  {"enable_thinking": False}}` → call jadi ~1-3s. `_strip_thinking` tetap ada (jaga-jaga).
+- **config.py in backend/**: `llm.py` & `illustrator.py` `import config`, so config.py
+  must be in the same folder as them (backend/, which is on sys.path). `.env` is in the root;
+  config reads it via `BASE_DIR = parent.parent`.
+- **Pexels key is required** to get candidates. Without a key, `search_pexels` returns `[]`
+  (the UI shows "no results"), render still runs but the bottom slot is black.
+- **vLLM endpoint (IMPORTANT)**: base URL = `.../models/qwen35` (NOT `.../model` — that one
+  can list models but its completions 504), model = `gb10-qwen35-122b-nvfp4-4node-100k`.
+  Either of these being wrong makes every call fail → all queries fall back to the fallback
+  (raw keywords) → illustrations go off-topic. `config.py` reads `.env` **once at startup** → changing
+  `.env` REQUIRES a server restart.
+- **Qwen3 = reasoning model → TURN OFF thinking**: with thinking ON, the model emits a long
+  `<think>` (minutes long) → nginx 504. `_chat` sends `extra_body={"chat_template_kwargs":
+  {"enable_thinking": False}}` → calls become ~1-3s. `_strip_thinking` is still there (just in case).
   Client `timeout=90`, `max_tokens=2000`.
-- **Cold-start 504**: request pertama setelah idle 504 (~60s) sambil model 122B di-load
-  ke GPU, tapi request itu yang nge-warm-in. `_chat` retry `_MAX_ATTEMPTS=3` → biasanya
-  attempt ke-2/3 kena model warm. Tetap fallback graceful kalau semua gagal — generate
-  ulang pas warm = instan.
-- **Topik diambil AUTO dari transcript penuh (fix 2026-06)**: dulu LLM cuma lihat snippet
-  per-window → query literal & loncat-loncat. Sekarang `illustrator.plan` gabungin SEMUA
-  kata jadi `full_transcript` (cap 8000 char) → `llm.queries_for_segments` sebagai konteks
-  global; system prompt: infer topik dari transcript lalu **anchor tiap query ke topik itu**
-  + imagery representatif/sopan buat topik abstrak/religi/historis. `title`/`description`
-  (form Step 1) = hint opsional, BUKAN syarat — user gak perlu isi. Catatan: query tetap
-  dibuat per-window, jadi window yang teksnya sendiri off-topic (mis. narator nyeletuk
-  "ngopi di warung") bisa ikut literal — tweak via durasi segmen / "↻ cari ulang" di UI.
-- **Whisper / GPU (fix 2026-06)**: `transcriber.py` auto-pakai **CUDA** kalau ada GPU,
-  default model **`medium` di GPU / `base` di CPU**. Env: `WHISPER_MODEL` + `WHISPER_LANGUAGE`
-  (dibaca dari `.env` via `_load_dotenv()` transcriber sendiri — gak butuh `config.py`, gak
-  bergantung urutan import). `.env` set `WHISPER_LANGUAGE=id`. `condition_on_previous_text=False`
-  (anti repeat/halusinasi). **Model di-load per call & VRAM dibebasin abis transcribe**
-  (`del`+`empty_cache`) biar render NVENC dapet GPU penuh; OOM CUDA → fallback CPU. **GPU gotcha:**
-  build `torch` HARUS cocok versi CUDA driver (driver di sini = 12.8 → butuh `cu12x`), kalau
-  nggak `cuda.is_available()` diam-diam `False` → Whisper jalan di CPU (lambat). `requirements.txt`
-  pin `torch==2.11.0+cu128` + index cu128 buat nyegah ini.
-- **ffmpeg image inputs**: tiap window = 1 input `-loop 1 -t dur`. Base hitam pakai
-  `d=dur` + `vstack shortest=1` biar output gak infinite (looped image itu infinite).
-- **Box free-form + render-area guide** (sama konsep kaya clipper) — box bebas ukuran; `drawOverlay` nampilin guide: mode COVER nge-dim margin yang kepotong + outline sub-rect 3:2 yang ke-render (`coverKeepRect`), mode BLUR_PAD seluruh box ke-render (gak ada crop). (Sempet di-lock ke 3:2, tapi owner mau ukuran bebas + nunjuk blur udah nampilin box utuh — jadi di-revert ke free-form + guide.)
-- **Bounds clamp**: commit (`mouseup`) lewat `clampToSource` + round-then-cap → box selalu di dalam frame. Defense-in-depth di backend: `renderer.py` `_clamp_kfs` (panggil `_probe_dims` di `render()`) cap box ke ukuran source — no-op buat box valid, tapi nyegah box off-frame bikin ffmpeg `crop` gagal. (Bug ini ketemu pas adversarial review.)
-- **Caption selalu di y=720** (TOP_H) — layout selalu 2-slot, gak ada single-box mode.
-- **Caption style = TikTok karaoke + bundled font** (sama kaya clipper): `assets/fonts/`
-  punya Anton (default) + Bebas Neue, libass diarahin via `subtitles=...:fontsdir=`.
-  `_build_ass` emit 1 Dialogue per word-slice, kata aktif di-highlight accent `#E8FF3A`
-  + scale pop, pakai per-word timing dari `_group_words` (`words:[...]`). Outline 6 / shadow 3.
-  Nambah font: drop .ttf, tambah ke `CAPTION_FONTS` + `<select>`, family name harus match.
+- **Cold-start 504**: the first request after idle 504s (~60s) while the 122B model loads
+  onto the GPU, but that request is what warms it up. `_chat` retries `_MAX_ATTEMPTS=3` → usually
+  the 2nd/3rd attempt hits the warm model. Still fails gracefully if everything fails — regenerating
+  once warm is instant.
+- **Topic is pulled AUTOMATICALLY from the full transcript (fix 2026-06)**: previously the LLM only saw
+  the per-window snippet → literal, jumpy queries. Now `illustrator.plan` joins ALL words into a
+  `full_transcript` (capped at 8000 chars) → passed to `llm.queries_for_segments` as global context;
+  system prompt: infer the topic from the transcript, then **anchor each query to that topic**
+  + representative/respectful imagery for abstract/religious/historical topics. `title`/`description`
+  (Step 1 form) = optional hints, NOT requirements — the user doesn't need to fill them in. Note: queries
+  are still generated per-window, so a window whose own text is off-topic (e.g. the narrator quipping
+  "having coffee at a stall") can still go literal — tweak via segment duration / "↻ search again" in the UI.
+- **Whisper / GPU (fix 2026-06)**: `transcriber.py` automatically uses **CUDA** when a GPU is present,
+  default model **`medium` on GPU / `base` on CPU**. Env: `WHISPER_MODEL` + `WHISPER_LANGUAGE`
+  (read from `.env` via the transcriber's own `_load_dotenv()` — doesn't need `config.py`, doesn't
+  depend on import order). `.env` sets `WHISPER_LANGUAGE=id`. `condition_on_previous_text=False`
+  (anti repeat/hallucination). **The model is loaded per call & VRAM is freed after transcribing**
+  (`del`+`empty_cache`) so the render's NVENC gets the full GPU; CUDA OOM → falls back to CPU. **GPU gotcha:**
+  the `torch` build MUST match the CUDA driver version (driver here = 12.8 → needs `cu12x`); otherwise
+  `cuda.is_available()` silently returns `False` → Whisper runs on CPU (slow). `requirements.txt`
+  pins `torch==2.11.0+cu128` + the cu128 index to prevent this.
+- **ffmpeg image inputs**: each window = 1 input `-loop 1 -t dur`. The black base uses
+  `d=dur` + `vstack shortest=1` so the output isn't infinite (a looped image is infinite).
+- **Free-form box + render-area guide** (same concept as clipper) — the box is any size; `drawOverlay` shows a guide: COVER mode dims the cropped-off margins + outlines the rendered 3:2 sub-rect (`coverKeepRect`), BLUR_PAD mode renders the whole box (no crop). (It was briefly locked to 3:2, but the owner wanted free sizing + pointed out that blur already shows the whole box — so it was reverted to free-form + guide.)
+- **Bounds clamp**: commit (`mouseup`) goes through `clampToSource` + round-then-cap → the box is always inside the frame. Defense-in-depth on the backend: `renderer.py` `_clamp_kfs` (called by `_probe_dims` in `render()`) caps the box to the source size — a no-op for valid boxes, but it prevents an off-frame box from making ffmpeg `crop` fail. (This bug was found during adversarial review.)
+- **Caption is always at y=720** (TOP_H) — the layout is always 2-slot, there is no single-box mode.
+- **Caption style = TikTok karaoke + bundled font** (same as clipper): `assets/fonts/`
+  has Anton (default) + Bebas Neue, libass is pointed at it via `subtitles=...:fontsdir=`.
+  `_build_ass` emits 1 Dialogue per word-slice, the active word is highlighted with the accent `#E8FF3A`
+  + a scale pop, using per-word timing from `_group_words` (`words:[...]`). Outline 6 / shadow 3.
+  To add a font: drop in the .ttf, add it to `CAPTION_FONTS` + the `<select>`, the family name must match.
 - **Encoder/cookies env**: `ILLUSTRATOR_ENCODER`, `ILLUSTRATOR_COOKIES_BROWSER`
-  (fallback ke `CLIPPER_*`).
-- **crop w/h INIT-LOCKED — box resize butuh per-segment crop** (fix 2026-06, sama
-  kaya clipper): filter `crop` ffmpeg evaluasi w/h **sekali di init** (cuma x/y yang
-  gerak per-frame). Jadi box yang **ganti ukuran** antar keyframe (zoom) nyangkut di
-  ukuran init (keyframe terakhir) — bug. `_crop_chain` deteksi `size_varies` lalu
-  route ke `_crop_chain_segmented`: tiap segmen di-crop literal (ukuran konstan) +
-  fit-nya, disambung via `overlay=enable=between(t,t0,t1)`. Ekspresi `_build_expr`
-  cuma buat single-kf / ukuran-konstan (pan x/y mulus). Ukuran jadi **stepped** pas
-  zoom (crop gak bisa per-frame w/h). Terverifikasi box resize jalan bener. **Jangan
-  balikin ke single expression-crop buat box yang resize** — itu bug-nya.
+  (fall back to `CLIPPER_*`).
+- **crop w/h INIT-LOCKED — box resize needs per-segment crop** (fix 2026-06, same
+  as clipper): the ffmpeg `crop` filter evaluates w/h **once at init** (only x/y move
+  per-frame). So a box that **changes size** between keyframes (zoom) gets stuck at the
+  init size (the last keyframe) — a bug. `_crop_chain` detects `size_varies` and then
+  routes to `_crop_chain_segmented`: each segment is cropped literally (constant size) +
+  fitted, then stitched together via `overlay=enable=between(t,t0,t1)`. The `_build_expr`
+  expression is only for single-kf / constant-size (smooth x/y pan). Sizing becomes **stepped**
+  on zoom (crop can't do per-frame w/h). Verified that box resize works correctly. **Don't
+  revert to a single expression-crop for a box that resizes** — that's the bug.
 
 ## Dev workflow
 
 ```bash
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # isi VLLM_API_KEY + PEXELS_API_KEY
+cp .env.example .env   # fill in VLLM_API_KEY + PEXELS_API_KEY
 cd backend && python main.py   # → http://127.0.0.1:8000
 ```
 
@@ -178,8 +178,8 @@ Syntax check: `python -m py_compile backend/*.py config.py` + `node -c frontend/
 
 ## Things NOT to do
 
-- ❌ Jangan tambah frontend framework / build step.
-- ❌ Jangan tambah DB / auth.
-- ❌ Jangan simpan kandidat gambar server-side — cuma yang kepilih, pas render.
-- ❌ Jangan ganti aspect ratio slot (3/8 + 5/8).
-- ❌ Jangan generate gambar pakai image-gen tanpa approval — owner pilih stock (Pexels).
+- ❌ Don't add a frontend framework / build step.
+- ❌ Don't add a DB / auth.
+- ❌ Don't store image candidates server-side — only the picked ones, at render time.
+- ❌ Don't change the slot aspect ratios (3/8 + 5/8).
+- ❌ Don't generate images with image-gen without approval — the owner picks stock (Pexels).

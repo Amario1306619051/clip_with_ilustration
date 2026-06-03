@@ -86,7 +86,7 @@ const video = $('#source-video');
 
 $('#btn-download').addEventListener('click', async () => {
   const url = $('#f-url').value.trim();
-  if (!url) { setStatus($('#dl-status'), 'URL kosong', 'err'); return; }
+  if (!url) { setStatus($('#dl-status'), 'URL is empty', 'err'); return; }
   setStatus($('#dl-status'), 'Downloading + trimming…');
   $('#btn-download').disabled = true;
   try {
@@ -396,7 +396,7 @@ function renderKfList() {
   const ol = $('#kf-items-1');
   ol.innerHTML = '';
   const kfs = sortedKfs();
-  if (!kfs.length) { ol.innerHTML = '<li class="muted">Belum ada keyframe.</li>'; return; }
+  if (!kfs.length) { ol.innerHTML = '<li class="muted">No keyframes yet.</li>'; return; }
   kfs.forEach((k, i) => {
     const next = kfs[i + 1];
     const tEnd = next ? next.t.toFixed(2) + 's' : 'end';
@@ -445,7 +445,7 @@ function drawPreview(canvas) {
     ctx.fillStyle = '#5a5a68';
     ctx.font = '10px JetBrains Mono';
     ctx.textAlign = 'center';
-    ctx.fillText('ilustrasi', PREVIEW_W / 2, TOP_PH + (PREVIEW_H - TOP_PH) / 2);
+    ctx.fillText('illustration', PREVIEW_W / 2, TOP_PH + (PREVIEW_H - TOP_PH) / 2);
     ctx.textAlign = 'left';
   }
   // slot divider line (where caption sits)
@@ -483,13 +483,13 @@ function coverDraw(ctx, src, sx, sy, sw, sh, dx, dy, dw, dh) {
 
 // ───────────────────────── step 2 → transcribe ─────────────────────────
 $('#btn-continue').addEventListener('click', async () => {
-  if (!state.box.length) { setStatus($('#tr-status'), 'Gambar minimal 1 crop box dulu', 'err'); return; }
-  setStatus($('#tr-status'), 'Transcribe (Whisper)… first run lama (load model)');
+  if (!state.box.length) { setStatus($('#tr-status'), 'Draw at least 1 crop box first', 'err'); return; }
+  setStatus($('#tr-status'), 'Transcribing (Whisper)… first run is slow (loading model)');
   $('#btn-continue').disabled = true;
   try {
     const r = await api('transcribe', { job_id: state.jobId });
     state.words = r.words || [];
-    setStatus($('#tr-status'), `OK · ${state.words.length} kata`, 'ok');
+    setStatus($('#tr-status'), `OK · ${state.words.length} words`, 'ok');
     showStep(3);
   } catch (e) {
     setStatus($('#tr-status'), e.message, 'err');
@@ -501,7 +501,7 @@ $('#btn-continue').addEventListener('click', async () => {
 // ───────────────────────── step 3: illustration plan ─────────────────────────
 $('#btn-plan').addEventListener('click', async () => {
   state.segSeconds = Number($('#seg-seconds').value) || 5;
-  setStatus($('#plan-status'), 'AI nyariin gambar per segmen…');
+  setStatus($('#plan-status'), 'AI is finding an image for each segment…');
   $('#btn-plan').disabled = true;
   try {
     const r = await api('plan', {
@@ -514,12 +514,12 @@ $('#btn-plan').addEventListener('click', async () => {
       description: $('#f-desc').value.trim(),
     });
     state.segments = (r.segments || []).map((s) => ({ ...s, picked: null, _img: null }));
-    // auto-pick first candidate per segment (biar bisa langsung render)
+    // auto-pick first candidate per segment (so you can render right away)
     for (const s of state.segments) {
       if (s.candidates && s.candidates.length) pickCandidate(s, s.candidates[0], false);
     }
     renderSegments();
-    setStatus($('#plan-status'), `OK · ${state.segments.length} segmen`, 'ok');
+    setStatus($('#plan-status'), `OK · ${state.segments.length} segments`, 'ok');
   } catch (e) {
     setStatus($('#plan-status'), e.message, 'err');
   } finally {
@@ -537,7 +537,7 @@ function pickCandidate(seg, cand, rerender) {
 
 function renderSegments() {
   const host = $('#ill-segments');
-  if (!state.segments.length) { host.innerHTML = '<div class="muted">Belum di-generate.</div>'; return; }
+  if (!state.segments.length) { host.innerHTML = '<div class="muted">Not generated yet.</div>'; return; }
   host.innerHTML = '';
   state.segments.forEach((seg) => {
     const card = document.createElement('div');
@@ -552,9 +552,9 @@ function renderSegments() {
         <span class="seg-time">${seg.t_start.toFixed(0)}–${seg.t_end.toFixed(0)}s</span>
         <span class="seg-text">"${(seg.text || '').slice(0, 80) || '(no speech)'}"</span>
         <input class="seg-query" value="${(seg.query || '').replace(/"/g, '')}">
-        <button class="seg-research ghost">↻ cari ulang</button>
+        <button class="seg-research ghost">↻ search again</button>
       </div>
-      <div class="seg-candidates">${cands || '<span class="seg-none">Ga ada hasil (cek PEXELS_API_KEY / edit keyword).</span>'}</div>`;
+      <div class="seg-candidates">${cands || '<span class="seg-none">No results (check PEXELS_API_KEY / edit the keyword).</span>'}</div>`;
 
     // candidate click → pick
     card.querySelectorAll('.cand').forEach((el) => el.addEventListener('click', () => {
@@ -574,7 +574,7 @@ function renderSegments() {
         if (seg.candidates.length) pickCandidate(seg, seg.candidates[0], false);
         renderSegments();
       } catch (e) {
-        btn.disabled = false; btn.textContent = '↻ cari ulang';
+        btn.disabled = false; btn.textContent = '↻ search again';
       }
     });
     host.appendChild(card);
@@ -593,7 +593,7 @@ function buildIllustrations() {
 }
 
 async function doRender(withCaption) {
-  if (!state.box.length) { setStatus($('#rd-status'), 'Belum ada crop box', 'err'); return; }
+  if (!state.box.length) { setStatus($('#rd-status'), 'No crop box yet', 'err'); return; }
   const rs = $('#rd-start').value, re = $('#rd-end').value;
   setStatus($('#rd-status'), withCaption ? 'Rendering + caption…' : 'Rendering (no caption)…');
   $('#btn-render').disabled = $('#btn-render-nocap').disabled = true;

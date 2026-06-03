@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="id">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -18,7 +18,7 @@
   <nav class="steps">
     <button class="step active" data-step="1"><span>01</span> Source</button>
     <button class="step" data-step="2"><span>02</span> Crop</button>
-    <button class="step" data-step="3"><span>03</span> Ilustrasi</button>
+    <button class="step" data-step="3"><span>03</span> Illustration</button>
     <button class="step" data-step="4"><span>04</span> Render</button>
   </nav>
 </header>
@@ -29,7 +29,7 @@
   <section class="panel" id="panel-1">
     <div class="panel-head">
       <h1>Source</h1>
-      <p>Tarik clip dari YouTube. Atas = video (1 box), bawah = ilustrasi AI yang nyambung sama omongan.</p>
+      <p>Pull a clip from YouTube. Top = video (1 box), bottom = AI illustration that matches what's being said.</p>
     </div>
 
     <div class="form-grid">
@@ -46,11 +46,11 @@
         <input type="text" id="f-start" value="00:00:00">
       </label>
       <label>
-        <span>End (HH:MM:SS) — kosongin = sampe abis</span>
+        <span>End (HH:MM:SS) — leave empty = until the end</span>
         <input type="text" id="f-end" placeholder="00:00:30">
       </label>
       <label class="full">
-        <span>Description (opsional)</span>
+        <span>Description (optional)</span>
         <textarea id="f-desc" rows="2"></textarea>
       </label>
     </div>
@@ -64,8 +64,8 @@
   <!-- STEP 2: CROP -->
   <section class="panel hidden" id="panel-2">
     <div class="panel-head">
-      <h1>Crop (slot atas)</h1>
-      <p>Scrub video → drag = set keyframe crop di waktu itu. Cuma 1 box (slot atas, 3:2). Fit cover/blur bebas per-segment.</p>
+      <h1>Crop (top slot)</h1>
+      <p>Scrub the video → drag = set a crop keyframe at that time. Only 1 box (top slot, 3:2). Cover/blur fit is free per segment.</p>
     </div>
 
     <div class="position-layout">
@@ -95,18 +95,18 @@
         <div class="box-controls">
           <div class="box-pill" id="pill-1">
             <span class="dot dot-1"></span>
-            <span>Crop box · slot ATAS (3/8, 3:2)</span>
+            <span>Crop box · TOP slot (3/8, 3:2)</span>
             <span class="kf-count" id="kf-count-1">0 kf</span>
-            <button data-clear="1" title="hapus semua keyframe">×</button>
+            <button data-clear="1" title="clear all keyframes">×</button>
           </div>
         </div>
 
         <div class="kf-controls">
           <span class="hint">
-            Klik pill / <kbd>1</kbd> buat arm canvas → di area video:
-            <br>• <b>Drag corner</b> = resize · <b>drag dalem</b> = geser · <b>drag luar</b> = box baru
-            <br>• Box <b>bebas ukuran</b>. Garis putih putus-putus = <b>area yang ke-render</b> (COVER); yang di-dim kepotong. Mau utuh tanpa kepotong? pakai <b>BLUR</b>.
-            <br>• Default kf = <b>HOLD</b> + <b>COVER</b>. Toggle di tiap segment row buat HOLD↔LINEAR (pan) / COVER↔BLUR (fit). · t = <span id="cur-time">0.00s</span>
+            Click the pill / <kbd>1</kbd> to arm the canvas → in the video area:
+            <br>• <b>Drag a corner</b> = resize · <b>drag inside</b> = move · <b>drag outside</b> = new box
+            <br>• The box is <b>any size</b>. The white dashed line = <b>the area that renders</b> (COVER); the dimmed part is cropped. Want it whole without cropping? use <b>BLUR</b>.
+            <br>• Default kf = <b>HOLD</b> + <b>COVER</b>. Toggle on each segment row for HOLD↔LINEAR (pan) / COVER↔BLUR (fit). · t = <span id="cur-time">0.00s</span>
           </span>
         </div>
 
@@ -119,7 +119,7 @@
       </div>
 
       <aside class="preview-wrap">
-        <div class="preview-label">Preview 9:16 (atas video · bawah ilustrasi)</div>
+        <div class="preview-label">Preview 9:16 (top video · bottom illustration)</div>
         <canvas id="preview" width="270" height="480"></canvas>
         <div class="preview-meta" id="preview-meta">—</div>
       </aside>
@@ -135,21 +135,21 @@
   <!-- STEP 3: ILUSTRASI -->
   <section class="panel hidden" id="panel-3">
     <div class="panel-head">
-      <h1>Ilustrasi</h1>
-      <p>Clip dipotong per-N detik. Tiap segmen AI nyariin gambar yang nyambung sama topiknya — pilih satu per segmen.</p>
+      <h1>Illustration</h1>
+      <p>The clip is split into N-second segments. For each segment the AI finds an image that matches the topic — pick one per segment.</p>
     </div>
 
     <div class="ill-controls">
       <label>
-        <span>Durasi per ilustrasi (detik)</span>
+        <span>Duration per illustration (seconds)</span>
         <input type="number" id="seg-seconds" value="5" min="1" max="30" step="1">
       </label>
-      <button id="btn-plan" class="primary">Generate ilustrasi →</button>
+      <button id="btn-plan" class="primary">Generate illustrations →</button>
       <span class="status" id="plan-status"></span>
     </div>
 
     <div class="ill-segments" id="ill-segments">
-      <div class="muted">Belum di-generate. Set durasi terus pencet "Generate ilustrasi".</div>
+      <div class="muted">Not generated yet. Set the duration, then click "Generate illustrations".</div>
     </div>
 
     <div class="actions">
@@ -162,7 +162,7 @@
   <section class="panel hidden" id="panel-4">
     <div class="panel-head">
       <h1>Render</h1>
-      <p>Compose 9:16: crop atas + ilustrasi bawah + caption. Satu klik, dapet output final.</p>
+      <p>Compose 9:16: top crop + bottom illustration + caption. One click and you get the final output.</p>
     </div>
 
     <div class="render-layout">
@@ -178,7 +178,7 @@
             <input type="number" id="rd-end" placeholder="end" step="0.1" min="0">
             <button type="button" class="ghost small" id="rd-clear" title="reset = full clip">×</button>
           </div>
-          <div class="hint">Kosongin = full clip.</div>
+          <div class="hint">Leave empty = full clip.</div>
         </div>
 
         <div class="caption-controls">
@@ -210,12 +210,12 @@
     <div class="actions">
       <button class="ghost" data-go="3">← Back</button>
       <button id="btn-render" class="primary">Render Final (with Caption) →</button>
-      <button id="btn-render-nocap" class="ghost" title="skip caption, preview cepat">Quick preview (no caption)</button>
+      <button id="btn-render-nocap" class="ghost" title="skip caption, fast preview">Quick preview (no caption)</button>
       <span class="status" id="rd-status"></span>
     </div>
 
     <div class="render-result hidden" id="render-result">
-      <h2 id="result-title">Render selesai.</h2>
+      <h2 id="result-title">Render complete.</h2>
       <div class="result-single">
         <div class="result-card" id="result-card">
           <div class="result-card-head">
@@ -223,12 +223,12 @@
             <a class="result-dl" href="#" download>↓ .mp4</a>
           </div>
           <video controls playsinline></video>
-          <p class="result-card-desc" id="result-card-desc">Crop atas + ilustrasi bawah.</p>
+          <p class="result-card-desc" id="result-card-desc">Top crop + bottom illustration.</p>
         </div>
       </div>
       <div class="result-actions">
         <button id="btn-done" class="ghost">Done · clean up source</button>
-        <span class="hint">Output di <code>output/</code> ke-overwrite tiap render — rename manual kalo mau keep.</span>
+        <span class="hint">The output in <code>output/</code> is overwritten on every render — rename it manually if you want to keep it.</span>
       </div>
     </div>
   </section>
