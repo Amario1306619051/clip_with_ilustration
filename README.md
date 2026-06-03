@@ -6,6 +6,8 @@ discussed**. Changes every N seconds. Automatic word-by-word captions.
 
 Sibling of `../clipper`. The difference: clipper has 2 video boxes, this has 1 video box + 1 illustration track.
 
+![ILLUSTRATOR — Render step: a 9:16 preview with the cropped video on top and the AI-picked illustration on the bottom](docs/preview.png)
+
 ## Flow
 
 1. **Source** — paste a YouTube URL + a time range → download & trim.
