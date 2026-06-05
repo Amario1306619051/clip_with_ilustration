@@ -100,6 +100,19 @@ So voice accuracy is the foundation of the entire illustration pipeline, not jus
 
 ---
 
+## AI auto-box (vision-LM crop assist)
+
+**Status:** ✅ DONE 2026-06 (ported from clipper). In the Crop step: type what the top crop
+should follow (e.g. "the speaker"), drag a single pair of range handles, hit **Generate** → the
+Qwen-VL endpoint (`vision.py`, `VISION_*` env) is asked for the subject's box on frames sampled
+across the range (`autobox.py`, ThreadPool×4), returning a keyframe track that drops into the top
+crop box (`state.box`), fully editable. Coords 0-1000 normalized → `px=v/1000*W,H`; absent subject
+→ no box (gap). Verified end-to-end (8/8 frames on a real clip). `/api/capabilities` gates the UI
+when no vision model is configured. **Stretch:** auto-pick the illustration subject too, or feed the
+auto-box crop into the thumbnail generator.
+
+---
+
 ## (placeholder for future items)
 
 When this project gets a GitHub repo, move these into Issues and keep this file as

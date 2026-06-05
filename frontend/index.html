@@ -101,6 +101,32 @@
           </div>
         </div>
 
+        <div class="autobox">
+          <div class="autobox-head">
+            <span class="autobox-title">✨ AI Auto-box</span>
+            <span class="hint">Type what the crop should follow, drag the range handles, then Generate. The AI draws a box track across the range — it lands below as keyframes you can drag / resize / delete.</span>
+          </div>
+          <div class="autobox-row">
+            <input type="text" id="ab-prompt" placeholder="what to follow — e.g. the speaker, the person's face">
+            <select id="ab-density" title="sampling density (more = smoother but slower)">
+              <option value="3">Fast · 3s</option>
+              <option value="1.5" selected>Balanced · 1.5s</option>
+              <option value="0.8">Smooth · 0.8s</option>
+            </select>
+            <label class="ab-check" title="Lock one box size across the range and only pan — stable framing, no zoom jitter"><input type="checkbox" id="ab-lock" checked> Stable size</label>
+            <button id="ab-generate" class="primary">Generate</button>
+          </div>
+          <div class="ab-range" id="ab-range" title="drag the two handles to set the time range to auto-predict">
+            <div class="ab-band" id="ab-band"></div>
+            <div class="ab-handle" id="ab-h-start" data-which="start" title="range start"></div>
+            <div class="ab-handle" id="ab-h-end" data-which="end" title="range end"></div>
+          </div>
+          <div class="ab-foot">
+            <span class="ab-range-lbl">range: <b id="ab-start-lbl">0.0s</b> → <b id="ab-end-lbl">end</b></span>
+            <span class="status" id="ab-status"></span>
+          </div>
+        </div>
+
         <div class="kf-controls">
           <span class="hint">
             Click the pill / <kbd>1</kbd> to arm the canvas → in the video area:

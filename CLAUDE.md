@@ -81,6 +81,8 @@ illustrator/
 │   ├── llm.py           vLLM client — transcript snippet → English stock query (batch)
 │   ├── illustrator.py   segment_clip / search_pexels / plan / download_pick
 │   ├── renderer.py      ffmpeg: top crop + bottom illustration track + caption
+│   ├── vision.py        Vision-LM client: prompt → bbox (AI auto-box for top crop)
+│   ├── autobox.py       Track predictor: sample frames over a range → keyframes
 │   ├── config.py        env loader — reads illustrator/.env (BASE_DIR = parent.parent)
 │   └── models.py        Pydantic schemas
 ├── frontend/            index.html / style.css / app.js
@@ -100,6 +102,8 @@ illustrator/
 | POST | `/api/plan` | `{job_id,words,segment_seconds,duration,title,description}` | `{segments:[{idx,t_start,t_end,text,query,candidates}]}` |
 | POST | `/api/search` | `{query}` | `{candidates:[{id,thumb,full,alt,photographer}]}` |
 | POST | `/api/render` | `{job_id,title,box,illustrations,words,caption_font,caption_size,cleanup,render_start,render_end}` | `{output_path,filename}` |
+| POST | `/api/autobox` | `{job_id,prompt,t_start,t_end,box,step_seconds}` | `{keyframes:[Keyframe],sampled,detected,message}` |
+| GET | `/api/capabilities` | — | `{vision: bool}` (is AI auto-box available) |
 | POST | `/api/cleanup` | `{job_id}` | `{ok:true}` |
 | GET | `/temp/{name}` / `/output/{name}` | — | mp4 |
 
@@ -146,6 +150,7 @@ illustrator/
 - **ffmpeg image inputs**: each window = 1 input `-loop 1 -t dur`. The black base uses
   `d=dur` + `vstack shortest=1` so the output isn't infinite (a looped image is infinite).
 - **Free-form box + render-area guide** (same concept as clipper) — the box is any size; `drawOverlay` shows a guide: COVER mode dims the cropped-off margins + outlines the rendered 3:2 sub-rect (`coverKeepRect`), BLUR_PAD mode renders the whole box (no crop). (It was briefly locked to 3:2, but the owner wanted free sizing + pointed out that blur already shows the whole box — so it was reverted to free-form + guide.)
+- **AI auto-box (vision-LM)** — `vision.py` + `autobox.py` (identical to clipper's; see clipper CLAUDE.md "AI auto-box" for the full spec). In the Crop step: type what the crop should follow, drag a single pair of range handles, **Generate** → `/api/autobox` samples frames over the range, asks the Qwen-VL endpoint (`VISION_*`, shared with browser_agent) for the subject's box on each, and drops a keyframe track into the **top crop box** (`state.box`) — editable afterwards. Coords are **0-1000 normalized → `px=v/1000*W,H`**; regex parse (output non-deterministic); largest-area box = subject; **absent subject → no box** (a run of misses becomes a `gap`/black keyframe). **Stable size (default `lock_size=True`)**: a two-pass step locks one box size for the whole range (percentile) and only pans the center → no zoom jitter; toggle off in the UI for adaptive size. Optional — `/api/capabilities` returns `{vision:false}` and the UI disables it when `VISION_*` is unset.
 - **Bounds clamp**: commit (`mouseup`) goes through `clampToSource` + round-then-cap → the box is always inside the frame. Defense-in-depth on the backend: `renderer.py` `_clamp_kfs` (called by `_probe_dims` in `render()`) caps the box to the source size — a no-op for valid boxes, but it prevents an off-frame box from making ffmpeg `crop` fail. (This bug was found during adversarial review.)
 - **Caption is always at y=720** (TOP_H) — the layout is always 2-slot, there is no single-box mode.
 - **Caption style = TikTok karaoke + bundled font** (same as clipper): `assets/fonts/`

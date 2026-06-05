@@ -45,6 +45,8 @@ const state = {
   segSeconds: 5,
   activeBox: null,  // null | 1
   currentTime: 0,
+  abDrag: null,                          // 'start' | 'end' while dragging a range handle
+  autoRange: { start: 0, end: null },    // AI auto-box time range (null end = clip end)
 };
 
 // ───────────────────────── step navigation ─────────────────────────
@@ -52,7 +54,7 @@ function showStep(n) {
   $$('.panel').forEach((p) => p.classList.add('hidden'));
   $(`#panel-${n}`).classList.remove('hidden');
   $$('.steps .step').forEach((b) => b.classList.toggle('active', b.dataset.step === String(n)));
-  if (n === 2) { resizeOverlay(); drawOverlay(); renderKfList(); }
+  if (n === 2) { resizeOverlay(); drawOverlay(); renderKfList(); renderAutoRange(); }
   if (n === 4) drawPreview($('#preview-2'));
 }
 $$('.steps .step').forEach((b) => b.addEventListener('click', () => {
@@ -99,6 +101,7 @@ $('#btn-download').addEventListener('click', async () => {
     });
     state.jobId = r.job_id;
     state.duration = r.duration;
+    state.autoRange = { start: 0, end: r.duration };
     state.srcW = r.width; state.srcH = r.height;
     video.src = r.video_path;
     $('#range-meta').textContent = `source: ${r.width}×${r.height} · ${r.duration.toFixed(1)}s`;
@@ -146,7 +149,7 @@ scrubber.addEventListener('input', () => { video.currentTime = Number(scrubber.v
 
 window.addEventListener('keydown', (e) => {
   if ($('#panel-2').classList.contains('hidden')) return;
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
   if (e.key === ' ') { e.preventDefault(); video.paused ? video.play() : video.pause(); }
   else if (e.key === 'ArrowLeft') { video.currentTime = Math.max(0, video.currentTime - 1); }
   else if (e.key === 'ArrowRight') { video.currentTime = Math.min(video.duration, video.currentTime + 1); }
@@ -637,3 +640,111 @@ $('#btn-done').addEventListener('click', async () => {
   $('#btn-done').textContent = 'Cleaned ✓';
   $('#btn-done').disabled = true;
 });
+
+// ───────────────────────── AI auto-box ─────────────────────────
+// A single pair of draggable handles sets [start,end]; "Generate" asks the vision
+// model for the prompted subject's box across that range and drops the resulting
+// track into the crop box (state.box), replacing keyframes inside the range.
+const AB_EPS = 0.15;
+
+function clampAutoRange() {
+  const dur = state.duration || video.duration || 0;
+  let start = state.autoRange.start ?? 0;
+  let end = state.autoRange.end == null ? dur : state.autoRange.end;
+  start = Math.max(0, Math.min(start, dur));
+  end = Math.max(0, Math.min(end, dur));
+  const MIN = 0.2;
+  if (end < start + MIN) {
+    if (state.abDrag === 'start') start = Math.max(0, end - MIN);
+    else end = Math.min(dur, start + MIN);
+  }
+  state.autoRange.start = start;
+  state.autoRange.end = end;
+}
+
+function renderAutoRange() {
+  const rangeEl = $('#ab-range');
+  if (!rangeEl) return;
+  const dur = state.duration || video.duration || 1;
+  clampAutoRange();
+  const s = state.autoRange.start;
+  const e = state.autoRange.end == null ? dur : state.autoRange.end;
+  const sp = (s / dur) * 100, ep = (e / dur) * 100;
+  $('#ab-h-start').style.left = sp + '%';
+  $('#ab-h-end').style.left = ep + '%';
+  const band = $('#ab-band');
+  band.style.left = sp + '%';
+  band.style.width = Math.max(0, ep - sp) + '%';
+  $('#ab-start-lbl').textContent = s.toFixed(1) + 's';
+  $('#ab-end-lbl').textContent = e.toFixed(1) + 's';
+}
+
+function startAbDrag(e, which) { e.preventDefault(); state.abDrag = which; }
+
+function onAbDragMove(e) {
+  if (!state.abDrag) return;
+  const rangeEl = $('#ab-range');
+  const dur = state.duration || video.duration || 0;
+  if (!rangeEl || !dur) return;
+  const r = rangeEl.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const t = frac * dur;
+  if (state.abDrag === 'start') state.autoRange.start = t;
+  else state.autoRange.end = t;
+  renderAutoRange();
+}
+
+async function doAutoBox() {
+  const prompt = ($('#ab-prompt').value || '').trim();
+  if (!prompt) { setStatus($('#ab-status'), 'Type what to track first', 'err'); return; }
+  if (!state.jobId) return;
+  const dur = state.duration || video.duration || 0;
+  const t0 = Math.max(0, state.autoRange.start || 0);
+  const t1 = state.autoRange.end == null ? dur : state.autoRange.end;
+  const step = Number($('#ab-density').value) || 1.5;
+  const btn = $('#ab-generate');
+  btn.disabled = true;
+  setStatus($('#ab-status'),
+    `Predicting boxes for "${prompt}" over ${t0.toFixed(1)}–${t1.toFixed(1)}s… (AI scanning frames)`);
+  try {
+    const r = await api('autobox', {
+      job_id: state.jobId, prompt, t_start: t0, t_end: t1, box: 1, step_seconds: step,
+      lock_size: $('#ab-lock') ? $('#ab-lock').checked : true,
+    });
+    const kfs = r.keyframes || [];
+    if (!kfs.length) {
+      setStatus($('#ab-status'), r.message || 'Nothing detected — try a different prompt or range', 'err');
+      return;
+    }
+    // Keep manual keyframes OUTSIDE the predicted range; replace inside it.
+    const keep = state.box.filter((k) => k.t < t0 - AB_EPS || k.t > t1 + AB_EPS);
+    state.box = [...keep, ...kfs].sort((a, b) => a.t - b.t);
+    setStatus($('#ab-status'),
+      `${r.message} Added ${kfs.length} keyframes — drag / resize / delete below.`, 'ok');
+    refreshKfUI();
+  } catch (e) {
+    setStatus($('#ab-status'), e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('#ab-generate').addEventListener('click', doAutoBox);
+$('#ab-h-start').addEventListener('mousedown', (e) => startAbDrag(e, 'start'));
+$('#ab-h-end').addEventListener('mousedown', (e) => startAbDrag(e, 'end'));
+window.addEventListener('mousemove', onAbDragMove);
+window.addEventListener('mouseup', () => { state.abDrag = null; });
+
+// Disable the AI auto-box UI when the backend has no vision model configured.
+(async () => {
+  try {
+    const res = await fetch('/api/capabilities');
+    if (!res.ok) return;
+    const caps = await res.json();
+    if (!caps.vision) {
+      $('#ab-generate').disabled = true;
+      $('#ab-prompt').disabled = true;
+      setStatus($('#ab-status'), 'AI auto-box is off — no vision model configured (set VISION_BASE_URL / VISION_MODEL in .env).', 'err');
+    }
+  } catch (e) { /* best-effort */ }
+})();

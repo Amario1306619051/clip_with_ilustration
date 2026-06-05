@@ -72,6 +72,15 @@ def download(url: str, start: str, end: Optional[str], title: str) -> dict:
         "merge_output_format": "mp4",
         "quiet": True,
         "no_warnings": True,
+        # Resilience against googlevideo.com read-timeouts on large files:
+        # cap per-request wait, retry the whole download and individual
+        # fragments, and split the body into 10 MiB chunks so a single stalled
+        # read can't kill the entire transfer. `.part` files are resumed.
+        "socket_timeout": 30,
+        "retries": 10,
+        "fragment_retries": 10,
+        "continuedl": True,
+        "http_chunk_size": 10 * 1024 * 1024,
     }
     # Enable a JS runtime for YouTube's n-challenge — without this, yt-dlp
     # gets only the storyboard images back. Prefer node, fall back to deno/bun

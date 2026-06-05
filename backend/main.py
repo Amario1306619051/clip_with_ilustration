@@ -7,10 +7,12 @@ from fastapi.staticfiles import StaticFiles
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import autobox
 import downloader
 import illustrator
 import renderer
 import transcriber
+import vision
 from models import (
     DownloadRequest, DownloadResponse,
     TranscribeRequest, TranscribeResponse,
@@ -18,6 +20,7 @@ from models import (
     SearchRequest, SearchResponse,
     RenderRequest, RenderResponse,
     CleanupRequest,
+    AutoBoxRequest, AutoBoxResponse,
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -103,6 +106,44 @@ def api_render(req: RenderRequest):
     if req.cleanup:
         downloader.cleanup_job(req.job_id)
     return result
+
+
+@app.post("/api/autobox", response_model=AutoBoxResponse)
+def api_autobox(req: AutoBoxRequest):
+    """AI auto-box: sample frames over [t_start,t_end] and ask the vision model for
+    the prompted subject's bounding box on each → a keyframe track for the top crop
+    box that the user can then edit."""
+    if not vision.enabled():
+        raise HTTPException(status_code=400,
+                            detail="vision model not configured (set VISION_BASE_URL / VISION_MODEL in .env)")
+    if not (req.prompt or "").strip():
+        raise HTTPException(status_code=400, detail="prompt required")
+    try:
+        src = downloader.get_source_path(req.job_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    try:
+        out = autobox.predict_track(
+            src, req.prompt, req.t_start, req.t_end,
+            step_seconds=req.step_seconds, padding=req.padding, smooth=req.smooth,
+            lock_size=req.lock_size,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    kfs = out["keyframes"]
+    cap_note = (f" (range long — sampled every {out['step']}s, capped at {out['sampled']} frames)"
+                if out.get("capped") else "")
+    msg = (f"Detected '{req.prompt.strip()}' in {out['detected']}/{out['sampled']} frames"
+           f" (every {out['step']}s).{cap_note}"
+           if kfs else
+           f"No '{req.prompt.strip()}' found in {out['sampled']} frames — try a different prompt or range.")
+    return {"keyframes": kfs, "sampled": out["sampled"], "detected": out["detected"], "message": msg}
+
+
+@app.get("/api/capabilities")
+def api_capabilities():
+    """Lets the frontend hide/disable the AI auto-box when no vision model is set."""
+    return {"vision": vision.enabled()}
 
 
 @app.post("/api/cleanup")
