@@ -20,8 +20,26 @@
     <button class="step" data-step="2"><span>02</span> Crop</button>
     <button class="step" data-step="3"><span>03</span> Illustration</button>
     <button class="step" data-step="4"><span>04</span> Render</button>
+    <button class="step" data-step="5"><span>05</span> Thumbnail</button>
   </nav>
 </header>
+
+<div class="layout">
+
+  <!-- BATCH QUEUE SIDEBAR -->
+  <aside class="queue-sidebar" id="queue-sidebar">
+    <div class="queue-head">
+      <span class="queue-title">⚙ Queue</span>
+      <button id="btn-queue-import" class="ghost small" title="Load a JSON of clips — the model downloads + auto-boxes them in the background">+ JSON</button>
+      <input type="file" id="queue-file" accept=".json,application/json,.txt" hidden>
+    </div>
+    <div class="queue-meta" id="queue-meta">No jobs queued.</div>
+    <span class="status" id="queue-status"></span>
+    <ul class="queue-list" id="queue-list"></ul>
+    <div class="queue-foot">
+      <span class="hint">Upload a JSON keyed by video URL. Each clip is downloaded + boxed automatically (bbox_1 = the crop prompt), one at a time — open one to fine-tune, delete when done. Progress is saved (survives restart).</span>
+    </div>
+  </aside>
 
 <main class="workspace">
 
@@ -259,7 +277,91 @@
     </div>
   </section>
 
+  <!-- STEP 5: THUMBNAIL -->
+  <section class="panel hidden" id="panel-5">
+    <div class="panel-head">
+      <h1>Thumbnail</h1>
+      <p>Drag the time bar to pick a frame, generate an eye-catching headline (or type your own), then export a 9:16 cover (PNG).</p>
+    </div>
+
+    <div class="thumb-layout">
+      <div class="thumb-stage">
+        <canvas id="thumb-canvas" width="405" height="720"></canvas>
+        <video id="thumb-video" playsinline style="display:none"></video>
+        <div class="thumb-scrub">
+          <span class="time-cur" id="thumb-time">0:00.0</span>
+          <input type="range" id="thumb-scrubber" class="scrubber" min="0" max="100" step="0.05" value="0">
+          <span class="time-dur" id="thumb-dur">0:00.0</span>
+        </div>
+        <div class="thumb-focus">
+          <label>Focus ↔ <input type="range" id="thumb-pan" min="0" max="100" value="50"></label>
+          <label>Focus ↕ <input type="range" id="thumb-pany" min="0" max="100" value="50"></label>
+        </div>
+      </div>
+
+      <aside class="thumb-controls">
+        <div class="thumb-gen">
+          <button id="btn-thumb-gen" class="primary">✨ Generate headline ideas</button>
+          <span class="status" id="thumb-gen-status"></span>
+          <div class="thumb-ideas" id="thumb-ideas"></div>
+        </div>
+
+        <label class="full">
+          <span>Headline text</span>
+          <textarea id="thumb-text" rows="3" placeholder="Type, or pick a generated idea above. Enter = new line."></textarea>
+        </label>
+
+        <div class="thumb-opts">
+          <label>
+            <span>Font</span>
+            <select id="thumb-font">
+              <option>Anton</option>
+              <option>Bebas Neue</option>
+              <option>Bricolage Grotesque</option>
+              <option>JetBrains Mono</option>
+              <option>Impact</option>
+              <option>Arial</option>
+            </select>
+          </label>
+          <label>
+            <span>Size</span>
+            <input type="number" id="thumb-size" value="130" min="20" max="400" step="2">
+          </label>
+          <label>
+            <span>Position</span>
+            <select id="thumb-pos">
+              <option value="top">Top</option>
+              <option value="middle">Middle</option>
+              <option value="bottom" selected>Bottom</option>
+            </select>
+          </label>
+          <label>
+            <span>Text</span>
+            <input type="color" id="thumb-color" value="#ffffff">
+          </label>
+          <label>
+            <span>Outline</span>
+            <input type="color" id="thumb-stroke" value="#000000">
+          </label>
+          <label class="thumb-check"><input type="checkbox" id="thumb-upper" checked> UPPERCASE</label>
+          <label class="thumb-check"><input type="checkbox" id="thumb-shade" checked> Shade behind text</label>
+        </div>
+
+        <div class="actions">
+          <button id="btn-thumb-dl" class="primary">↓ Download PNG (1080×1920)</button>
+          <span class="status" id="thumb-status"></span>
+        </div>
+      </aside>
+    </div>
+
+    <div class="actions">
+      <button class="ghost" data-go="4">← Back</button>
+    </div>
+  </section>
+
 </main>
+
+</div>
 
 <script src="app.js"></script>
 </body>

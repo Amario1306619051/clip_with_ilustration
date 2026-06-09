@@ -8,9 +8,11 @@ from fastapi.staticfiles import StaticFiles
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import autobox
+import batchqueue as batch_queue
 import downloader
 import illustrator
 import renderer
+import thumbnail
 import transcriber
 import vision
 from models import (
@@ -21,6 +23,8 @@ from models import (
     RenderRequest, RenderResponse,
     CleanupRequest,
     AutoBoxRequest, AutoBoxResponse,
+    ThumbnailTextRequest, ThumbnailTextResponse,
+    QueueImportRequest, QueueJobPatch,
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -31,6 +35,10 @@ TEMP_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 app = FastAPI(title="ILLUSTRATOR")
+
+# Start the batch-queue worker: downloads + auto-boxes queued clips one at a time
+# in the background, resuming from queue/queue.json across restarts.
+batch_queue.start_worker()
 
 
 @app.post("/api/download", response_model=DownloadResponse)
@@ -140,15 +148,80 @@ def api_autobox(req: AutoBoxRequest):
     return {"keyframes": kfs, "sampled": out["sampled"], "detected": out["detected"], "message": msg}
 
 
+@app.post("/api/thumbnail-text", response_model=ThumbnailTextResponse)
+def api_thumbnail_text(req: ThumbnailTextRequest):
+    """Eye-catching thumbnail headline suggestions (text only) from the LLM. The
+    frame + compositing + PNG export are all done client-side on a canvas."""
+    if not thumbnail.enabled():
+        raise HTTPException(status_code=400,
+                            detail="text model not configured (set VLLM_BASE_URL / VLLM_MODEL in .env)")
+    try:
+        titles = thumbnail.generate_titles(req.context, req.n, req.language)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"titles": titles}
+
+
 @app.get("/api/capabilities")
 def api_capabilities():
-    """Lets the frontend hide/disable the AI auto-box when no vision model is set."""
-    return {"vision": vision.enabled()}
+    """Lets the frontend hide/disable the AI auto-box (vision) and the thumbnail
+    headline ideas (text model) when the endpoints aren't configured."""
+    return {"vision": vision.enabled(), "thumbnail": thumbnail.enabled()}
 
 
 @app.post("/api/cleanup")
 def api_cleanup(req: CleanupRequest):
     downloader.cleanup_job(req.job_id)
+    return {"ok": True}
+
+
+# ───────────────────────── batch queue ─────────────────────────
+@app.post("/api/queue/import")
+def api_queue_import(req: QueueImportRequest):
+    """Upload a JSON of clips ({url: [{id,start,end,title,description,bbox_1,bbox_2}]}).
+    Each clip becomes a queued job the background worker downloads + auto-boxes
+    (bbox_1 = the single crop box prompt; bbox_2 is ignored in illustrator)."""
+    try:
+        return batch_queue.import_text(req.content)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"could not parse JSON: {e}")
+
+
+@app.get("/api/queue")
+def api_queue_list():
+    """Sidebar summary of every job (status, kf counts) — polled by the frontend."""
+    return {"jobs": batch_queue.list_jobs()}
+
+
+@app.get("/api/queue/{key}")
+def api_queue_get(key: str):
+    """Full job (incl. predicted/edited keyframes) to load into the editor."""
+    j = batch_queue.get_job(key)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    return j
+
+
+@app.post("/api/queue/{key}/save")
+def api_queue_save(key: str, patch: QueueJobPatch):
+    """Auto-save edits (title + keyframes) back to the job so progress survives."""
+    j = batch_queue.save_job(key, patch.model_dump(exclude_none=True))
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"ok": True}
+
+
+@app.post("/api/queue/{key}/retry")
+def api_queue_retry(key: str):
+    j = batch_queue.retry_job(key)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"ok": True}
+
+
+@app.delete("/api/queue/{key}")
+def api_queue_delete(key: str):
+    batch_queue.delete_job(key)
     return {"ok": True}
 
 

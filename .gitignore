@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 temp/*
 output/*
+queue/
 !temp/.gitkeep
 !output/.gitkeep
 cookies.txt

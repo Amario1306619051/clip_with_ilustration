@@ -33,7 +33,13 @@ Layout is locked the same as clipper: top 720 (3/8), bottom 1200 (5/8), caption 
                      temp/{job_id}_ill_{hash}.jpg  (picked images, deleted on cleanup)
 ```
 
-4-step linear flow: **Source → Crop → Illustration → Render**. No DB, no auth.
+5-step linear flow: **Source → Crop → Illustration → Render → Thumbnail**, plus a **batch-queue sidebar**. No DB, no auth — except the queue persists to `queue/queue.json` (the one deliberate on-disk state; owner asked for resumable batch progress).
+
+**Batch queue** (`batchqueue.py` + the queue-* frontend block) is clipper's batch queue with two illustrator-specific differences (see clipper CLAUDE.md "Batch queue" for the full spec):
+- `NUM_BOXES = 1` — auto-boxes the single top crop from `bbox_1` (`bbox_2` is parsed but unused).
+- **No render phase** — illustrator does NOT set `RENDER_IN_QUEUE`, so the worker only does download + predict; there are no `/api/queue/{key}/render` routes. Render stays **manual** because it needs the interactive Illustration step (pick stock photos). The JSON's optional **`segment_seconds`** (aliases `seg_seconds`/`jeda`) is stored per job and **pre-fills the Illustration step's duration** on open, so the user just picks images then renders via Step 3-4.
+
+Upload a JSON `{url:[{id,start,end,title,description,bbox_1,segment_seconds}]}` → worker downloads + auto-boxes each clip, persists to `queue/queue.json`; open a ready job to fine-tune the crop (auto-saved), do illustrations + render manually, delete when done. **⚠️ The module is `batchqueue.py`, not `queue.py`** — a `queue.py` on `sys.path` shadows the stdlib `queue` urllib3/yt-dlp need and crashes boot.
 Job state = filesystem in `temp/` keyed by 12-char hex `job_id`.
 
 ## Flow (important)
@@ -83,6 +89,8 @@ illustrator/
 │   ├── renderer.py      ffmpeg: top crop + bottom illustration track + caption
 │   ├── vision.py        Vision-LM client: prompt → bbox (AI auto-box for top crop)
 │   ├── autobox.py       Track predictor: sample frames over a range → keyframes
+│   ├── thumbnail.py     Text-LLM client: context → eye-catching headline ideas; self-loads .env
+│   ├── batchqueue.py    Persistent batch queue + background worker (JSON import → download + auto-box). NUM_BOXES=1
 │   ├── config.py        env loader — reads illustrator/.env (BASE_DIR = parent.parent)
 │   └── models.py        Pydantic schemas
 ├── frontend/            index.html / style.css / app.js
@@ -103,7 +111,9 @@ illustrator/
 | POST | `/api/search` | `{query}` | `{candidates:[{id,thumb,full,alt,photographer}]}` |
 | POST | `/api/render` | `{job_id,title,box,illustrations,words,caption_font,caption_size,cleanup,render_start,render_end}` | `{output_path,filename}` |
 | POST | `/api/autobox` | `{job_id,prompt,t_start,t_end,box,step_seconds}` | `{keyframes:[Keyframe],sampled,detected,message}` |
-| GET | `/api/capabilities` | — | `{vision: bool}` (is AI auto-box available) |
+| POST | `/api/thumbnail-text` | `{context,n,language}` | `{titles:[str]}` (eye-catching headline ideas) |
+| POST/GET/DELETE | `/api/queue` `/api/queue/import` `/api/queue/{key}` `/api/queue/{key}/save` `/api/queue/{key}/retry` | batch queue | identical to clipper; `bbox_1` = the single crop prompt (`bbox_2` parsed but unused) |
+| GET | `/api/capabilities` | — | `{vision: bool, thumbnail: bool}` (auto-box / headline ideas available) |
 | POST | `/api/cleanup` | `{job_id}` | `{ok:true}` |
 | GET | `/temp/{name}` / `/output/{name}` | — | mp4 |
 
@@ -151,6 +161,7 @@ illustrator/
   `d=dur` + `vstack shortest=1` so the output isn't infinite (a looped image is infinite).
 - **Free-form box + render-area guide** (same concept as clipper) — the box is any size; `drawOverlay` shows a guide: COVER mode dims the cropped-off margins + outlines the rendered 3:2 sub-rect (`coverKeepRect`), BLUR_PAD mode renders the whole box (no crop). (It was briefly locked to 3:2, but the owner wanted free sizing + pointed out that blur already shows the whole box — so it was reverted to free-form + guide.)
 - **AI auto-box (vision-LM)** — `vision.py` + `autobox.py` (identical to clipper's; see clipper CLAUDE.md "AI auto-box" for the full spec). In the Crop step: type what the crop should follow, drag a single pair of range handles, **Generate** → `/api/autobox` samples frames over the range, asks the Qwen-VL endpoint (`VISION_*`, shared with browser_agent) for the subject's box on each, and drops a keyframe track into the **top crop box** (`state.box`) — editable afterwards. Coords are **0-1000 normalized → `px=v/1000*W,H`**; regex parse (output non-deterministic); largest-area box = subject; **absent subject → no box** (a run of misses becomes a `gap`/black keyframe). **Stable size (default `lock_size=True`)**: a two-pass step locks one box size for the whole range (percentile) and only pans the center → no zoom jitter; toggle off in the UI for adaptive size. Optional — `/api/capabilities` returns `{vision:false}` and the UI disables it when `VISION_*` is unset.
+- **Thumbnail generator (Step 5)** — `thumbnail.py` + the thumb-* frontend block (identical to clipper's; see clipper CLAUDE.md "Thumbnail generator" for the full spec). A standalone 9:16 cover maker, **almost entirely client-side**: pick a frame on its own `#thumb-video` scrubber, the text LLM (`VLLM_*`, the same Qwen3 used for stock queries — NOT the vision endpoint) proposes eye-catching headlines via `/api/thumbnail-text`, editable or type your own, then export a 1080×1920 PNG with `canvas.toBlob` (nothing written server-side). Headlines are in the **content's language** (Indonesian content → Indonesian headlines) — the English-everywhere rule is about code/UI, not generated output. `thumbnail.py` self-loads `.env` and defaults `VLLM_*` to the internal endpoint; `enable_thinking=False` + cold-start retries. `/api/capabilities` returns `{thumbnail:false}` (disabling only the **Generate ideas** button; manual typing + export still work) when `VLLM_*` is cleared.
 - **Bounds clamp**: commit (`mouseup`) goes through `clampToSource` + round-then-cap → the box is always inside the frame. Defense-in-depth on the backend: `renderer.py` `_clamp_kfs` (called by `_probe_dims` in `render()`) caps the box to the source size — a no-op for valid boxes, but it prevents an off-frame box from making ffmpeg `crop` fail. (This bug was found during adversarial review.)
 - **Caption is always at y=720** (TOP_H) — the layout is always 2-slot, there is no single-box mode.
 - **Caption style = TikTok karaoke + bundled font** (same as clipper): `assets/fonts/`

@@ -873,3 +873,74 @@ kbd {
 .ab-foot b { color: var(--text); }
 .ab-check { display: flex; align-items: center; gap: 5px; flex: 0 0 auto; font-size: 12px; color: var(--text-dim); white-space: nowrap; cursor: pointer; }
 .ab-check input { margin: 0; cursor: pointer; }
+
+/* ───────────────────────── thumbnail step ───────────────────────── */
+.thumb-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) 1fr;
+  gap: 24px;
+  align-items: start;
+}
+.thumb-stage { display: flex; flex-direction: column; gap: 12px; }
+#thumb-canvas {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 9 / 16;
+  background: #000;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: block;
+}
+.thumb-scrub { display: flex; align-items: center; gap: 10px; }
+.thumb-scrub .scrubber { flex: 1; }
+.thumb-scrub .time-cur, .thumb-scrub .time-dur {
+  font-size: 12px; color: var(--text-dim); min-width: 48px;
+}
+.thumb-scrub .time-dur { text-align: right; }
+.thumb-focus { display: flex; gap: 16px; }
+.thumb-focus label {
+  flex: 1; display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--text-dim);
+}
+.thumb-focus input[type="range"] { flex: 1; }
+
+.thumb-controls { display: flex; flex-direction: column; gap: 16px; }
+.thumb-gen { display: flex; flex-direction: column; gap: 8px; }
+.thumb-ideas { display: flex; flex-wrap: wrap; gap: 8px; }
+.thumb-idea {
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  max-width: 100%;
+  text-align: left;
+}
+.thumb-idea:hover { border-color: var(--accent); color: var(--accent); }
+.thumb-controls textarea { resize: vertical; min-height: 64px; }
+.thumb-controls label.full { display: flex; flex-direction: column; gap: 6px; }
+.thumb-controls label.full > span { font-size: 12px; color: var(--text-dim); }
+
+.thumb-opts {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+.thumb-opts > label {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 12px; color: var(--text-dim);
+}
+.thumb-opts > label > span { font-size: 12px; color: var(--text-dim); }
+.thumb-opts input[type="color"] {
+  padding: 2px; height: 34px; cursor: pointer;
+}
+.thumb-check {
+  flex-direction: row !important; align-items: center; gap: 6px;
+  white-space: nowrap; cursor: pointer;
+}
+.thumb-check input { width: auto; margin: 0; cursor: pointer; }
+
+@media (max-width: 820px) {
+  .thumb-layout { grid-template-columns: 1fr; }
+}
