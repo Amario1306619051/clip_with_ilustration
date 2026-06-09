@@ -33,13 +33,13 @@ Layout is locked the same as clipper: top 720 (3/8), bottom 1200 (5/8), caption 
                      temp/{job_id}_ill_{hash}.jpg  (picked images, deleted on cleanup)
 ```
 
-5-step linear flow: **Source → Crop → Illustration → Render → Thumbnail**, plus a **batch-queue sidebar**. No DB, no auth — except the queue persists to `queue/queue.json` (the one deliberate on-disk state; owner asked for resumable batch progress).
+5-step linear flow: **Source → Crop → Illustration → Render → Thumbnail**, plus a **batch-queue sidebar**. No auth — and stateless except the batch queue, which persists to a local **SQLite** DB `queue/queue.db` (the one deliberate on-disk state; owner asked for resumable batch progress, in a real DB not a JSON file).
 
 **Batch queue** (`batchqueue.py` + the queue-* frontend block) is clipper's batch queue with two illustrator-specific differences (see clipper CLAUDE.md "Batch queue" for the full spec):
 - `NUM_BOXES = 1` — auto-boxes the single top crop from `bbox_1` (`bbox_2` is parsed but unused).
 - **No render phase** — illustrator does NOT set `RENDER_IN_QUEUE`, so the worker only does download + predict; there are no `/api/queue/{key}/render` routes. Render stays **manual** because it needs the interactive Illustration step (pick stock photos). The JSON's optional **`segment_seconds`** (aliases `seg_seconds`/`jeda`) is stored per job and **pre-fills the Illustration step's duration** on open, so the user just picks images then renders via Step 3-4.
 
-Upload a JSON `{url:[{id,start,end,title,description,bbox_1,segment_seconds}]}` → worker downloads + auto-boxes each clip, persists to `queue/queue.json`; open a ready job to fine-tune the crop (auto-saved), do illustrations + render manually, delete when done. **⚠️ The module is `batchqueue.py`, not `queue.py`** — a `queue.py` on `sys.path` shadows the stdlib `queue` urllib3/yt-dlp need and crashes boot.
+Upload a JSON `{url:[{id,start,end,title,description,bbox_1,segment_seconds}]}` → worker downloads + auto-boxes each clip, persists to the SQLite DB `queue/queue.db` (jobs + a relational keyframes table, no JSON blob); open a ready job to fine-tune the crop (auto-saved), do illustrations + render manually, delete when done. **⚠️ The module is `batchqueue.py`, not `queue.py`** — a `queue.py` on `sys.path` shadows the stdlib `queue` urllib3/yt-dlp need and crashes boot. Also `sqlite3`'s `with conn:` only manages the transaction, not the handle — use the `_db()` context manager (commits + closes).
 Job state = filesystem in `temp/` keyed by 12-char hex `job_id`.
 
 ## Flow (important)
