@@ -119,6 +119,27 @@ CAPTION_FONTS = [
 ]
 
 
+class SfxPlacement(BaseModel):
+    """A soundboard sound placed onto the clip.
+      - kind 'oneshot' — plays once starting at `t` (seconds, clip time).
+      - kind 'range'   — plays over [t, t_end]; `loop` repeats it when the sound
+                         is shorter than the range. `t_end` required for range.
+    `volume` is a linear multiplier (1.0 = original) to balance against the
+    clip's own audio. Times are clip-relative (re-based to a render sub-range)."""
+    sound_id: str
+    kind: str = "oneshot"          # 'oneshot' | 'range'
+    t: float = 0.0
+    t_end: Optional[float] = None
+    volume: float = 1.0
+    loop: bool = False
+
+
+class SoundPatch(BaseModel):
+    """Rename / set default volume for a library sound."""
+    name: Optional[str] = None
+    volume: Optional[float] = None
+
+
 class RenderRequest(BaseModel):
     job_id: str
     title: str = "clip"
@@ -132,6 +153,8 @@ class RenderRequest(BaseModel):
     cleanup: bool = False
     render_start: Optional[float] = None
     render_end: Optional[float] = None
+    # Soundboard sound effects mixed into the audio (one-shot + range/loop).
+    sfx: list[SfxPlacement] = Field(default_factory=list)
 
 
 class RenderResponse(BaseModel):

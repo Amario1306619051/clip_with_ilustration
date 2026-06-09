@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Optional
 
 import illustrator
-from models import IllustrationPick, Keyframe, Word
+import soundboard
+from models import IllustrationPick, Keyframe, SfxPlacement, Word
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -263,6 +264,97 @@ def _shift_illustrations(picks: list[IllustrationPick], start: float, end: Optio
     return out
 
 
+# ───────────────────────── soundboard SFX (audio mix) ─────────────────────────
+def _shift_sfx(sfx: list[SfxPlacement], start: float, end: Optional[float]) -> list[SfxPlacement]:
+    """Re-base SFX placements onto the render sub-range (filtergraph t=0 ==
+    `start`). One-shots before `start`/at-or-after `end` dropped; range clipped."""
+    if not sfx:
+        return sfx or []
+    if (not start or start <= 0) and end is None:
+        return sfx
+    start = max(0.0, start or 0.0)
+    out: list[SfxPlacement] = []
+    for s in sfx:
+        if s.kind == "range":
+            t0 = max(float(s.t), start)
+            t1 = float(s.t_end) if s.t_end is not None else (end if end is not None else t0)
+            if end is not None:
+                t1 = min(t1, end)
+            if t1 <= t0:
+                continue
+            out.append(s.model_copy(update={"t": t0 - start, "t_end": t1 - start}))
+        else:
+            t = float(s.t)
+            if t < start or (end is not None and t >= end):
+                continue
+            out.append(s.model_copy(update={"t": t - start}))
+    return out
+
+
+def _probe_has_audio(path: Path) -> bool:
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True)
+        return "audio" in (out.stdout or "")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+_AFMT = "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo"
+
+
+def _audio_inputs_and_graph(sfx, source_has_audio, out_dur, src_audio="0:a", first_sfx_index=1):
+    """Build the audio side when SFX are placed. Returns (extra_input_args,
+    filter_parts, amap); each usable SFX adds one ffmpeg input. Returns
+    ([], [], None) when there are no usable SFX (caller keeps `-map 0:a?`).
+    Mix = clip audio (or silence) + each SFX scaled by volume + delayed to start;
+    range SFX trimmed to their window and `-stream_loop`'d when asked. See the
+    clipper renderer for the same helper (kept in sync)."""
+    usable = []
+    for s in (sfx or []):
+        p = soundboard.path_for(s.sound_id)
+        if p:
+            usable.append((s, p))
+    if not usable:
+        return [], [], None
+
+    parts: list[str] = []
+    if source_has_audio:
+        parts.append(f"[{src_audio}]{_AFMT}[abase]")
+    else:
+        parts.append(f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+                     f"atrim=duration={max(0.1, out_dur):.3f}[abase]")
+    labels = ["abase"]
+
+    inputs: list[str] = []
+    idx = first_sfx_index
+    for j, (s, p) in enumerate(usable):
+        is_range = (s.kind == "range" and s.t_end is not None)
+        if is_range and bool(s.loop):
+            inputs += ["-stream_loop", "-1"]
+        inputs += ["-i", str(p)]
+        f: list[str] = []
+        if is_range:
+            dur = max(0.05, float(s.t_end) - float(s.t))
+            f.append(f"atrim=duration={dur:.3f}")
+            f.append("asetpts=PTS-STARTPTS")
+        vol = max(0.0, float(s.volume if s.volume is not None else 1.0))
+        f.append(f"volume={vol:.3f}")
+        f.append(_AFMT)
+        delay = int(round(max(0.0, float(s.t)) * 1000))
+        if delay > 0:
+            f.append(f"adelay={delay}:all=1")
+        parts.append(f"[{idx}:a]" + ",".join(f) + f"[sfx{j}]")
+        labels.append(f"sfx{j}")
+        idx += 1
+
+    mix = "".join(f"[{lbl}]" for lbl in labels)
+    parts.append(f"{mix}amix=inputs={len(labels)}:normalize=0:duration=first[aout]")
+    return inputs, parts, "[aout]"
+
+
 def _normalize_keyframes(keyframes: list[Keyframe]) -> list[dict]:
     cleaned: list[dict] = []
     for k in sorted(keyframes, key=lambda kk: kk.t):
@@ -454,6 +546,7 @@ def render(
     caption_size: int = 64,
     render_start: Optional[float] = None,
     render_end: Optional[float] = None,
+    sfx: Optional[list[SfxPlacement]] = None,
 ) -> dict:
     if not box:
         raise ValueError("box (top crop) is required with >= 1 keyframe")
@@ -467,6 +560,7 @@ def render(
         box = _shift_keyframes(box, rs)
         words = _shift_words(words, rs, re_)
         illustrations = _shift_illustrations(illustrations, rs, re_)
+        sfx = _shift_sfx(sfx, rs, re_)
 
     # Defense-in-depth: clamp the box inside the source frame (no-op for valid
     # boxes; prevents an off-frame crop from crashing ffmpeg).
@@ -528,6 +622,14 @@ def render(
     parts.append("[top][bot]vstack=inputs=2:shortest=1[stacked]")
     last = "stacked"
 
+    # Soundboard SFX → audio mix (only when sounds are placed). SFX inputs come
+    # AFTER the video (0) and the image inputs (1..N), so they start at 1+N.
+    sfx_inputs, sfx_parts, amap = _audio_inputs_and_graph(
+        sfx, _probe_has_audio(source_path), dur, first_sfx_index=1 + len(img_inputs))
+    if sfx_parts:
+        parts.extend(sfx_parts)
+    audio_map = amap or "0:a?"
+
     ass_path_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
     fonts_escaped = str(FONTS_DIR).replace("\\", "/").replace(":", "\\:")
     if groups:
@@ -566,10 +668,14 @@ def render(
         cmd += ["-itsoffset", f"{float(pick.t_start):.3f}", "-loop", "1",
                 "-framerate", "2", "-t", f"{win:.3f}", "-i", str(path)]
 
+    # SFX inputs come after the video + image inputs (indices line up with
+    # first_sfx_index = 1 + len(img_inputs) used when building the audio graph).
+    cmd += sfx_inputs
+
     cmd += [
         "-filter_complex", filter_complex,
         "-map", vmap,
-        "-map", "0:a?",
+        "-map", audio_map,
         *_encode_args(),
         "-c:a", "aac", "-b:a", "192k",
         "-movflags", "+faststart",

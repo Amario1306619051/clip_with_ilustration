@@ -4,6 +4,7 @@ __pycache__/
 temp/*
 output/*
 queue/
+soundboard/
 !temp/.gitkeep
 !output/.gitkeep
 cookies.txt

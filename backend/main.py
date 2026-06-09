@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -12,6 +12,7 @@ import batchqueue as batch_queue
 import downloader
 import illustrator
 import renderer
+import soundboard
 import thumbnail
 import transcriber
 import vision
@@ -25,6 +26,7 @@ from models import (
     AutoBoxRequest, AutoBoxResponse,
     ThumbnailTextRequest, ThumbnailTextResponse,
     QueueImportRequest, QueueJobPatch,
+    SoundPatch,
 )
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -107,6 +109,7 @@ def api_render(req: RenderRequest):
             caption_size=req.caption_size,
             render_start=req.render_start,
             render_end=req.render_end,
+            sfx=req.sfx,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -223,6 +226,47 @@ def api_queue_retry(key: str):
 def api_queue_delete(key: str):
     batch_queue.delete_job(key)
     return {"ok": True}
+
+
+# ───────────────────────── soundboard ─────────────────────────
+@app.get("/api/soundboard")
+def api_sb_list():
+    """The persistent SFX library (id, name, duration, default volume)."""
+    return {"sounds": soundboard.list_sounds()}
+
+
+@app.post("/api/soundboard")
+async def api_sb_add(request: Request, name: str = "", filename: str = ""):
+    """Import an audio file. The file bytes are the raw request body (no
+    multipart dependency); `name`/`filename` come from the query string."""
+    data = await request.body()
+    try:
+        return soundboard.add_sound(name, filename, data)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/api/soundboard/{sid}")
+def api_sb_update(sid: str, patch: SoundPatch):
+    s = soundboard.update_sound(sid, patch.model_dump(exclude_none=True))
+    if not s:
+        raise HTTPException(status_code=404, detail="sound not found")
+    return s
+
+
+@app.delete("/api/soundboard/{sid}")
+def api_sb_delete(sid: str):
+    soundboard.delete_sound(sid)
+    return {"ok": True}
+
+
+@app.get("/api/soundboard/{sid}/audio")
+def api_sb_audio(sid: str):
+    """Serve the audio file — used for in-browser preview playback."""
+    p = soundboard.path_for(sid)
+    if not p:
+        raise HTTPException(status_code=404, detail="sound not found")
+    return FileResponse(p, media_type=soundboard.media_type(sid))
 
 
 @app.get("/temp/{name}")

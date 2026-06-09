@@ -33,7 +33,7 @@ Layout is locked the same as clipper: top 720 (3/8), bottom 1200 (5/8), caption 
                      temp/{job_id}_ill_{hash}.jpg  (picked images, deleted on cleanup)
 ```
 
-5-step linear flow: **Source → Crop → Illustration → Render → Thumbnail**, plus a **batch-queue sidebar**. No auth — and stateless except the batch queue, which persists to a local **SQLite** DB `queue/queue.db` (the one deliberate on-disk state; owner asked for resumable batch progress, in a real DB not a JSON file).
+6-step linear flow: **Source → Crop → Illustration → Render → Thumbnail → Sound**, plus a **batch-queue sidebar**. The **Sound** step (`soundboard.py` + the `sfx-*` frontend block) is identical to clipper's "Soundboard / SFX" (see clipper CLAUDE.md): a persistent SFX library (own SQLite db + audio files in `soundboard/`, raw-body upload, no multipart) + per-clip placements (one-shot / range+loop, each with a volume) carried in `RenderRequest.sfx` and mixed by the renderer's `_audio_inputs_and_graph` — SFX inputs come after the source + image inputs (`first_sfx_index = 1 + len(img_inputs)`). No auth — and stateless except the batch queue, which persists to a local **SQLite** DB `queue/queue.db` (the one deliberate on-disk state; owner asked for resumable batch progress, in a real DB not a JSON file).
 
 **Batch queue** (`batchqueue.py` + the queue-* frontend block) is clipper's batch queue with two illustrator-specific differences (see clipper CLAUDE.md "Batch queue" for the full spec):
 - `NUM_BOXES = 1` — auto-boxes the single top crop from `bbox_1` (`bbox_2` is parsed but unused).
@@ -91,6 +91,7 @@ illustrator/
 │   ├── autobox.py       Track predictor: sample frames over a range → keyframes
 │   ├── thumbnail.py     Text-LLM client: context → eye-catching headline ideas; self-loads .env
 │   ├── batchqueue.py    Persistent batch queue + background worker (JSON import → download + auto-box). NUM_BOXES=1
+│   ├── soundboard.py    Persistent SFX library (SQLite + audio files); renderer mixes placements into the audio
 │   ├── config.py        env loader — reads illustrator/.env (BASE_DIR = parent.parent)
 │   └── models.py        Pydantic schemas
 ├── frontend/            index.html / style.css / app.js
@@ -113,6 +114,7 @@ illustrator/
 | POST | `/api/autobox` | `{job_id,prompt,t_start,t_end,box,step_seconds}` | `{keyframes:[Keyframe],sampled,detected,message}` |
 | POST | `/api/thumbnail-text` | `{context,n,language}` | `{titles:[str]}` (eye-catching headline ideas) |
 | POST/GET/DELETE | `/api/queue` `/api/queue/import` `/api/queue/{key}` `/api/queue/{key}/save` `/api/queue/{key}/retry` | batch queue | identical to clipper; `bbox_1` = the single crop prompt (`bbox_2` parsed but unused) |
+| GET/POST/DELETE | `/api/soundboard` `/api/soundboard/{id}` `/api/soundboard/{id}/audio` | SFX library | identical to clipper; import = raw body + `?name=&filename=`. `RenderRequest.sfx` mixes placements into the audio |
 | GET | `/api/capabilities` | — | `{vision: bool, thumbnail: bool}` (auto-box / headline ideas available) |
 | POST | `/api/cleanup` | `{job_id}` | `{ok:true}` |
 | GET | `/temp/{name}` / `/output/{name}` | — | mp4 |

@@ -21,6 +21,7 @@
     <button class="step" data-step="3"><span>03</span> Illustration</button>
     <button class="step" data-step="4"><span>04</span> Render</button>
     <button class="step" data-step="5"><span>05</span> Thumbnail</button>
+    <button class="step" data-step="6"><span>06</span> Sound</button>
   </nav>
 </header>
 
@@ -356,6 +357,66 @@
 
     <div class="actions">
       <button class="ghost" data-go="4">← Back</button>
+    </div>
+  </section>
+
+  <!-- STEP 6: SOUND EFFECTS -->
+  <section class="panel hidden" id="panel-6">
+    <div class="panel-head">
+      <h1>Sound Effects</h1>
+      <p>Import sounds into your soundboard (saved across restarts), then drop them onto the clip — a one-shot at a moment, or a layer over a range (with loop). Each placement has its own volume. They're mixed in when you <b>Render</b> (Step 4).</p>
+    </div>
+
+    <div class="sfx-layout">
+      <div class="sfx-left">
+        <div class="sfx-stage">
+          <video id="sfx-video" playsinline></video>
+          <div class="sfx-scrub">
+            <button class="ctrl-btn" id="sfx-play" title="Play/Pause">▶</button>
+            <span class="time-cur" id="sfx-time">0:00.0</span>
+            <input type="range" id="sfx-scrubber" class="scrubber" min="0" max="100" step="0.05" value="0">
+            <span class="time-dur" id="sfx-dur">0:00.0</span>
+          </div>
+        </div>
+
+        <div class="sfx-placements">
+          <div class="sfx-sub-head">Placed sounds <span class="kf-count" id="sfx-count">0</span></div>
+          <ol class="sfx-list" id="sfx-list"></ol>
+        </div>
+      </div>
+
+      <aside class="sfx-right">
+        <div class="sfx-board-head">
+          <span class="sfx-title">🔊 Soundboard</span>
+          <button id="btn-sfx-import" class="ghost small">+ Import</button>
+          <input type="file" id="sfx-file" accept="audio/*" hidden>
+        </div>
+        <span class="status" id="sfx-status"></span>
+        <div class="sfx-board" id="sfx-board"></div>
+
+        <div class="sfx-addrange">
+          <div class="sfx-sub-head">Add as a layer (range)</div>
+          <label class="sfx-field"><span>Sound</span>
+            <select id="sfx-range-sound"></select>
+          </label>
+          <div class="sfx-range-row">
+            <label><span>start (s)</span><input type="number" id="sfx-rs" step="0.1" min="0" placeholder="0"></label>
+            <button class="ghost small" id="sfx-rs-cur" title="from current time">⟵ cur</button>
+            <label><span>end (s)</span><input type="number" id="sfx-re" step="0.1" min="0" placeholder="end"></label>
+            <button class="ghost small" id="sfx-re-cur" title="from current time">⟵ cur</button>
+          </div>
+          <div class="sfx-range-opts">
+            <label class="sfx-check"><input type="checkbox" id="sfx-loop" checked> loop to fill range</label>
+            <button class="primary" id="btn-sfx-addrange">Add layer</button>
+          </div>
+        </div>
+
+        <div class="hint">Click a pad = <b>preview</b>. <b>＋ here</b> drops a one-shot at the current time. For a background bed, pick a sound + range above. Adjust each placement's volume in the list to balance against the clip audio.</div>
+      </aside>
+    </div>
+
+    <div class="actions">
+      <button class="ghost" data-go="4">← Back to Render</button>
     </div>
   </section>
 
