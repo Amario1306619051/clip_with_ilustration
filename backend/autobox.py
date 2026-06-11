@@ -289,7 +289,10 @@ _CONTENT_PROBE_PROMPT = ("the content being shown or reacted to — an embedded 
 
 _CAM_PRESENT_QUESTION = ("Is the live streamer's own webcam view visible in this frame "
                          "(the person reacting — not people inside the content being "
-                         "shown)? Answer with one word: yes or no.")
+                         "shown)? A face that is PART of a meme, an edited image, or "
+                         "the video being reacted to does NOT count as a webcam view — "
+                         "even if it looks like the streamer's own face pasted into the "
+                         "content. Answer with one word: yes or no.")
 
 
 def _geom(det, w, h):
@@ -327,7 +330,26 @@ def _classify_layout(source_path: Path, t: float, w: int, h: int):
     if p_huge:
         return ("full", None)
     if p_panel:
-        return ("split", p_side)
+        # A panel-shaped person box is AMBIGUOUS: in a fullscreen webcam shot
+        # where the streamer sits off-center, the person box also comes out
+        # edge-anchored at ~half the frame — geometrically identical to a true
+        # split panel (systematic, so no amount of majority voting fixes it).
+        # The real discriminator is the OTHER side: a true split has content
+        # there. Require corroboration from the content probe — anything it
+        # finds clear of the person panel on the opposite side counts (it
+        # often boxes an object INSIDE the content panel, e.g. a 380px banner
+        # within an 825px panel, so no minimum width). Without that, it's a
+        # fullscreen webcam shot with the streamer sitting off-center.
+        c = vision.detect_box(b64, _CONTENT_PROBE_PROMPT, w, h)
+        c_huge2, _, _, c_side2 = _geom(c, w, h)
+        if c is not None and not c_huge2 and c_side2 != p_side:
+            if p_side == "left":
+                clear = c["x"] >= (p["x"] + p["w"]) - 0.08 * w
+            else:
+                clear = (c["x"] + c["w"]) <= p["x"] + 0.08 * w
+            if clear:
+                return ("split", p_side)
+        return ("full", None)
     c = vision.detect_box(b64, _CONTENT_PROBE_PROMPT, w, h)
     c_huge = _geom(c, w, h)[0]
     if p is None:
@@ -380,7 +402,107 @@ def _detect_layout_segments(source_path: Path, t0: float, t1: float, w: int, h: 
         segs = _refine_with_change_flags(source_path, segs, t0, t1, min_gap, w, h)
     except Exception as e:  # noqa: BLE001 — refinement is best-effort
         log.warning("change-flag refinement failed (kept probe segments): %s", e)
+    try:
+        segs = _polish_boundaries(source_path, segs, w, h, min_gap)
+    except Exception as e:  # noqa: BLE001 — polish is best-effort
+        log.warning("boundary polish failed (kept segments): %s", e)
     return segs
+
+
+def _polish_boundaries(source_path: Path, segs: list, w: int, h: int,
+                       min_gap: float) -> list:
+    """Densely re-probe a window around every boundary between DIFFERENT-label
+    segments and move the boundary to the actual flip point. Cures the 'box
+    keeps following the previous segment' defect: a misplaced boundary holds
+    the old geometry for seconds over the wrong frames, and the box detection
+    can't self-correct because the filled {layout} prompt ASSERTS the (wrong)
+    layout — the model obligingly draws the asserted panel even on a
+    fullscreen frame. The geometric classifier here carries no such assertion.
+
+    Window labels get the same inconclusive-fill + lone-flake smoothing as the
+    probe grid (majority immunity a single bisection probe lacks). A run of a
+    THIRD label between the two sides (e.g. a fullscreen meme between
+    fullscreen-webcam and split) is inserted as its own segment. A window
+    that's entirely one side slides toward the other (the boundary is further
+    out than the window). A quick 2-frame check first skips the dense pass on
+    boundaries that are already right."""
+    if len(segs) < 2 or not vision.enabled():
+        return segs
+    step = max(0.4, float(min_gap))
+    HALF = 2.4
+
+    def classify_many(ts):
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+            return list(ex.map(lambda t: _classify_layout(source_path, t, w, h), ts))
+
+    so = [s["layout"] for s in segs if s["layout"] in ("split", "overlay")]
+    maj = max(set(so), key=so.count) if so else None
+
+    def norm(l):
+        if not l:
+            return None
+        if l[0] in ("full", "fullcontent"):
+            return (l[0], None)
+        return (maj, l[1]) if maj else (l[0], l[1])
+
+    out = [dict(s) for s in segs]
+    i = 0
+    while i < len(out) - 1:
+        L, R = out[i], out[i + 1]
+        Llab = (L["layout"], L["side"])
+        Rlab = (R["layout"], R["side"])
+        if Llab == Rlab:
+            i += 1
+            continue
+        tb = R["t0"]
+        lo_lim, hi_lim = L["t0"] + 0.3, R["t1"] - 0.3
+        # quick check: both sides of the boundary already match their labels?
+        qa, qb = max(lo_lim, tb - 0.5), min(hi_lim, tb + 0.5)
+        quick = [norm(l) for l in classify_many([qa, qb])]
+        if quick[0] == Llab and quick[1] == Rlab:
+            i += 1
+            continue
+        for _attempt in range(3):
+            lo, hi = max(lo_lim, tb - HALF), min(hi_lim, tb + HALF)
+            if hi - lo < step:
+                break
+            ts = [round(lo + k * step, 2) for k in range(int((hi - lo) / step) + 1)]
+            labs = [norm(l) for l in classify_many(ts)]
+            known = [j for j, l in enumerate(labs) if l]
+            if not known:
+                break
+            labs = [l if l else labs[min(known, key=lambda kj: abs(kj - j))]
+                    for j, l in enumerate(labs)]
+            for j in range(1, len(labs) - 1):   # lone-flake smoothing
+                if labs[j] != labs[j - 1] and labs[j - 1] == labs[j + 1]:
+                    labs[j] = labs[j - 1]
+            lastL = max((j for j, l in enumerate(labs) if l == Llab), default=None)
+            firstR = min((j for j, l in enumerate(labs) if l == Rlab), default=None)
+            if lastL is not None and firstR is not None and lastL < firstR:
+                mid = labs[lastL + 1:firstR]
+                if (len(mid) >= 2 and mid[0] not in (Llab, Rlab)
+                        and all(m == mid[0] for m in mid)):
+                    # a hidden third state between the sides → own segment
+                    m0 = round((ts[lastL] + ts[lastL + 1]) / 2.0, 2)
+                    m1 = round((ts[firstR - 1] + ts[firstR]) / 2.0, 2)
+                    L["t1"] = m0
+                    out.insert(i + 1, {"t0": m0, "t1": m1,
+                                       "layout": mid[0][0], "side": mid[0][1]})
+                    R["t0"] = m1
+                    i += 1            # the inserted segment's edges are fresh
+                else:
+                    newtb = round((ts[lastL] + ts[firstR]) / 2.0, 2)
+                    L["t1"] = newtb
+                    R["t0"] = newtb
+                break
+            if lastL is not None and firstR is None:
+                tb = min(hi_lim, hi + HALF)   # whole window is L → slide right
+            elif firstR is not None and lastL is None:
+                tb = max(lo_lim, lo - HALF)   # whole window is R → slide left
+            else:
+                break                          # noise — keep the original
+        i += 1
+    return [s for s in out if s["t1"] - s["t0"] > 0.4]
 
 
 def _refine_with_change_flags(source_path: Path, segs: list, t0: float, t1: float,
