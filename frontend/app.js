@@ -111,6 +111,8 @@ $('#btn-download').addEventListener('click', async () => {
     state.autoRange = { start: 0, end: r.duration };
     state.srcW = r.width; state.srcH = r.height;
     state.sfx = [];                // placements are per-clip
+    state.autoObs = '';            // no model observation for an ad-hoc clip
+    if ($('#ab-context')) $('#ab-context').value = '';   // context is per-clip
     state.activeQueueKey = null;   // ad-hoc download — not editing a queue job
     video.src = r.video_path;
     $('#range-meta').textContent = `source: ${r.width}×${r.height} · ${r.duration.toFixed(1)}s`;
@@ -705,13 +707,19 @@ function onAbDragMove(e) {
 }
 
 async function doAutoBox() {
-  const prompt = ($('#ab-prompt').value || '').trim();
-  if (!prompt) { setStatus($('#ab-status'), 'Type what to track first', 'err'); return; }
+  const raw = ($('#ab-prompt').value || '').trim();
+  if (!raw) { setStatus($('#ab-status'), 'Type what to track first', 'err'); return; }
   if (!state.jobId) return;
+  // Merge [model observation] + [shared layout context] + [box instruction],
+  // matching the batch worker. The context carries the {layout}/{side}
+  // placeholders, which the backend resolves per detected segment.
+  const obs = (state.autoObs || '').trim();
+  const ctx = ($('#ab-context') ? $('#ab-context').value : '').trim();
+  const prompt = [obs, ctx, raw].filter(Boolean).join(' ');
   const dur = state.duration || video.duration || 0;
   const t0 = Math.max(0, state.autoRange.start || 0);
   const t1 = state.autoRange.end == null ? dur : state.autoRange.end;
-  const step = Number($('#ab-density').value) || 1.5;
+  const step = Number($('#ab-density').value) || 0.2;
   const btn = $('#ab-generate');
   btn.disabled = true;
   setStatus($('#ab-status'),
@@ -903,7 +911,8 @@ async function doThumbGen() {
   if (btn) btn.disabled = true;
   setStatus($('#thumb-gen-status'), 'Generating headline ideas… (first call may warm the model)');
   try {
-    const res = await api('thumbnail-text', { context, n: 6 });
+    const tone = $('#thumb-tone') ? $('#thumb-tone').value : '';
+    const res = await api('thumbnail-text', { context, n: 6, tone });
     const titles = res.titles || [];
     renderThumbIdeas(titles);
     setStatus($('#thumb-gen-status'),
@@ -1052,6 +1061,11 @@ async function openQueueJob(key) {
   $('#f-start').value = job.start || '00:00:00';
   $('#f-end').value = job.end || '';
   $('#f-desc').value = job.description || '';
+  // Context (with {layout}/{side} placeholders) goes in its own editable field;
+  // the box prompt holds only the short instruction. doAutoBox re-merges
+  // [observation] + [context] + [prompt] at Generate time — like the batch worker.
+  state.autoObs = (job.auto_context || '').trim();
+  if ($('#ab-context')) $('#ab-context').value = job.context || '';
   if ($('#ab-prompt')) $('#ab-prompt').value = job.prompt1 || '';
   // Pre-fill the Illustration step's segment length if the JSON specified it,
   // so the user just picks images (render stays manual for illustrator).
@@ -1068,7 +1082,12 @@ async function openQueueJob(key) {
 }
 
 function queueSig() {
-  return JSON.stringify({ t: ($('#f-title').value || ''), b: state.box });
+  return JSON.stringify({
+    t: ($('#f-title').value || ''),
+    b: state.box,
+    ctx: ($('#ab-context') ? $('#ab-context').value : ''),
+    p1: ($('#ab-prompt') ? $('#ab-prompt').value : ''),
+  });
 }
 
 async function autosaveQueue() {
@@ -1080,6 +1099,8 @@ async function autosaveQueue() {
     await api(`queue/${state.activeQueueKey}/save`, {
       title: ($('#f-title').value || 'clip').trim() || 'clip',
       box1: state.box || [],
+      context: $('#ab-context') ? $('#ab-context').value : '',
+      prompt1: $('#ab-prompt') ? $('#ab-prompt').value : '',
     });
     setStatus($('#queue-status'), 'Progress saved ✓', 'ok');
   } catch (e) { /* retry next tick */ }

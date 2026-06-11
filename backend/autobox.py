@@ -564,6 +564,69 @@ def merge_double_gaps(kfs1: list, kfs2: list, w: int, h: int, classify=None) -> 
     return _dedupe_keyframes(out1), _dedupe_keyframes(out2)
 
 
+def _active_kf(kfs: list, t: float):
+    """The keyframe reigning at time t (the last kf whose t <= t), or None."""
+    cur = None
+    for k in kfs:
+        if k["t"] <= t + 1e-6:
+            cur = k
+        else:
+            break
+    return cur
+
+
+def _resolve_pair(T: dict, O: dict, min_overlap_px: float):
+    """If box T overlaps box O as a side-by-side SPLIT (not a contained PiP),
+    return T's (x, w) snapped off the overlap at the shared divider (overlap
+    midpoint); else None. The divider formula is symmetric, so both boxes
+    converge to the same seam."""
+    Tx0, Tx1 = T["x"], T["x"] + T["w"]
+    Ox0, Ox1 = O["x"], O["x"] + O["w"]
+    lo, hi = max(Tx0, Ox0), min(Tx1, Ox1)
+    if hi - lo <= min_overlap_px:                       # no real overlap
+        return None
+    if (Tx0 <= Ox0 and Tx1 >= Ox1) or (Ox0 <= Tx0 and Ox1 >= Tx1):
+        return None                                     # containment → PiP/overlay, not a split
+    if Tx0 <= Ox0:                                      # T is the LEFT panel → trim right edge
+        divider = (Tx1 + Ox0) / 2.0
+        return (Tx0, max(2.0, divider - Tx0))
+    divider = (Ox1 + Tx0) / 2.0                         # T is the RIGHT panel → push left edge
+    return (divider, max(2.0, Tx1 - divider))
+
+
+def resolve_split_overlap(kfs1: list, kfs2: list, w: int, h: int,
+                          min_overlap_px: float = 12.0) -> tuple:
+    """Two side-by-side split panels must not overlap horizontally. The vision
+    model often returns the streamer panel a touch too wide (bleeding into the
+    content) and the content panel a touch too far in, so their crops double up
+    on the seam — the visible "ngaceo" in a split. For every time both boxes are
+    real and overlap as a true left/right split, snap both edges to the shared
+    divider. No-op for fullscreen (one box gap), overlay/PiP (containment), or
+    clean splits. Returns (new_kfs1, new_kfs2). (Unused in illustrator's single-
+    box flow; kept in sync with clipper's autobox.)"""
+    if not kfs1 or not kfs2:
+        return kfs1, kfs2
+    orig1, orig2 = [dict(k) for k in kfs1], [dict(k) for k in kfs2]
+    out1, out2 = [dict(k) for k in kfs1], [dict(k) for k in kfs2]
+    for i, k in enumerate(out1):
+        if k.get("gap"):
+            continue
+        o = _active_kf(orig2, k["t"])
+        if o and not o.get("gap"):
+            r = _resolve_pair(orig1[i], o, min_overlap_px)
+            if r:
+                k["x"], k["w"] = r
+    for i, k in enumerate(out2):
+        if k.get("gap"):
+            continue
+        o = _active_kf(orig1, k["t"])
+        if o and not o.get("gap"):
+            r = _resolve_pair(orig2[i], o, min_overlap_px)
+            if r:
+                k["x"], k["w"] = r
+    return out1, out2
+
+
 def predict_track(
     source_path: Path,
     prompt: str,

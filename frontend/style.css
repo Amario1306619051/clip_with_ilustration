@@ -847,6 +847,17 @@ kbd {
 .autobox-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
 .autobox-title { color: var(--accent); font-weight: 700; white-space: nowrap; }
 .autobox-head .hint { flex: 1; min-width: 220px; }
+.autobox-ctx { margin-bottom: 14px; }
+.ab-ctx-lbl { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 5px; }
+.ab-ctx-lbl .hint { font-weight: 400; }
+.ab-ctx-lbl code {
+  background: var(--bg-elev-2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 0 4px; font-size: 11px; color: var(--accent);
+}
+#ab-context { width: 100%; resize: vertical; min-height: 64px; font-size: 12px; line-height: 1.45; }
+.thumb-gen-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+.thumb-tone-lbl { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); }
+.thumb-tone-lbl select { flex: 0 0 auto; }
 .autobox-row { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
 #ab-prompt { flex: 1; min-width: 0; }
 #ab-density, #ab-generate { flex: 0 0 auto; }

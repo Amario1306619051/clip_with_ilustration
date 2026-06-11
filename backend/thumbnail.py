@@ -123,17 +123,31 @@ def _clean_line(line: str) -> str:
     return _TRAIL_RE.sub("", _LEAD_RE.sub("", line)).strip()
 
 
-def generate_titles(context: str, n: int = 5, language: str = "") -> list[str]:
+# Tone presets injected into the prompt. "" / "default" = the neutral punchy
+# style; "funny" = the playful, joking, meme-y voice the user asked for ("kocak").
+_TONE_HINTS = {
+    "funny": ("\nTONE: make them FUNNY and playful — joking, witty, a bit absurd, "
+              "meme-y energy. Light sarcasm and puns are welcome (still TRUE to the "
+              "content, never offensive)."),
+    "serious": ("\nTONE: keep them serious, clear and informative — no jokes."),
+    "clickbait": ("\nTONE: maximum curiosity-gap clickbait energy (shock, "
+                  "FOMO, 'you won't believe…') — but never an outright lie."),
+}
+
+
+def generate_titles(context: str, n: int = 5, language: str = "", tone: str = "") -> list[str]:
     """Return up to `n` distinct eye-catching headline options derived from the
-    video context. Falls back to a keyword guess if the LLM call/parse fails so
-    the UI never hard-stops on a bad model response."""
+    video context. `tone` ("funny"/"serious"/"clickbait"/"") biases the voice.
+    Falls back to a keyword guess if the LLM call/parse fails so the UI never
+    hard-stops on a bad model response."""
     context = (context or "").strip()[:_MAX_CONTEXT_CHARS]
     n = max(1, min(int(n or 5), 10))
     if not context:
         context = "(no transcript available — write a generic but catchy headline)"
     lang_hint = f"\nThe content language is: {language.strip()}." if language.strip() else ""
+    tone_hint = _TONE_HINTS.get((tone or "").strip().lower(), "")
     user = (
-        f"Give me {n} thumbnail headline options for this video.{lang_hint}\n\n"
+        f"Give me {n} thumbnail headline options for this video.{lang_hint}{tone_hint}\n\n"
         f"VIDEO CONTEXT:\n{context}"
     )
     try:

@@ -162,7 +162,7 @@ def api_thumbnail_text(req: ThumbnailTextRequest):
         raise HTTPException(status_code=400,
                             detail="text model not configured (set VLLM_BASE_URL / VLLM_MODEL in .env)")
     try:
-        titles = thumbnail.generate_titles(req.context, req.n, req.language)
+        titles = thumbnail.generate_titles(req.context, req.n, req.language, req.tone)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     return {"titles": titles}

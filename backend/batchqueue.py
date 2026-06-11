@@ -338,7 +338,9 @@ def get_job(key: str) -> Optional[dict]:
 
 def save_job(key: str, patch: dict) -> Optional[dict]:
     """Persist edits from the editor (title + keyframes). Only known fields."""
-    allowed = {k: patch[k] for k in ("title", "box1", "box2", "description") if k in patch}
+    allowed = {k: patch[k] for k in
+               ("title", "box1", "box2", "description", "context", "prompt1", "prompt2")
+               if k in patch}
     if not allowed:
         return _find(key)
     return _update(key, **allowed)
