@@ -344,14 +344,128 @@ def _classify_layout(source_path: Path, t: float, w: int, h: int):
     return None
 
 
+# Change-flag probe: ask the model to COMPARE two frames instead of classifying
+# each independently. Binary same/changed answers are far more reliable than
+# absolute 4-class labels (classification noise was producing spurious micro-
+# segments → flickering boxes), and they directly flag WHEN the streamer/content
+# panel moves or resizes — even within the same layout class.
+_CHANGE_PROBE_QUESTION = (
+    "These are two frames from the same stream video: frame A first, frame B "
+    "second. Did the SCREEN LAYOUT change between them — a webcam panel or "
+    "content panel appearing, disappearing, MOVING, or changing SIZE? Ignore "
+    "what plays INSIDE a panel (the video content itself changing does not "
+    "count); only the panel geometry matters. "
+    "Answer exactly 'SAME' or 'CHANGED: <one short phrase>'."
+)
+
+
 def _detect_layout_segments(source_path: Path, t0: float, t1: float, w: int, h: int,
                             min_gap: float = 1.0, max_probes: int = 9):
-    """The layout can CHANGE mid-clip (the cam moves / the split flips). Probe
-    spread frames, label each (layout, side), smooth isolated flaky labels
-    (majority-of-3), merge equal runs into segments, and refine each boundary by
-    BISECTION down to ~`min_gap`s so the switch time is accurate. Returns ordered
-    segments [{t0, t1, layout, side}] covering [t0, t1], or None if every probe
+    """The layout can CHANGE mid-clip (the cam moves / the split flips).
+    Base: the classification-probe path (validated). Then CHANGE-FLAG
+    refinement — pairwise frame comparisons VERIFY each boundary (a boundary
+    the model says nothing changed across is probe noise → merged away, which
+    kills flickery micro-segments) and flag panel moves/resizes INSIDE long
+    split segments (so the per-segment size lock re-measures on each side).
+    Pure comparison-driven segmentation was tried and measured WORSE (person
+    movement in fullscreen stretches flags false CHANGEDs, and one
+    classification per span loses the majority-vote noise immunity) — so
+    comparisons only ever refine the validated base, never replace it.
+    Returns ordered segments [{t0, t1, layout, side}], or None if every probe
     was inconclusive."""
+    segs = _segments_from_class_probes(source_path, t0, t1, w, h, min_gap, max_probes)
+    if not segs:
+        return segs
+    try:
+        segs = _refine_with_change_flags(source_path, segs, t0, t1, min_gap)
+    except Exception as e:  # noqa: BLE001 — refinement is best-effort
+        log.warning("change-flag refinement failed (kept probe segments): %s", e)
+    return segs
+
+
+def _refine_with_change_flags(source_path: Path, segs: list, t0: float, t1: float,
+                              min_gap: float) -> list:
+    """Comparison pass over probe-detected segments:
+    1. Each boundary is straddled with one 'did anything change?' probe
+       (±1.2s). SAME → the boundary was classification noise → the two
+       segments merge (the longer side's label wins). This is what kills the
+       spurious sub-second gap/flicker blips.
+    2. Long split/overlay segments get one start-vs-end probe; CHANGED →
+       the panel moved/resized mid-segment → bisect (by comparison) and split
+       the segment in two same-label halves, each with its own size lock.
+       Fullscreen segments are skipped — a person moving IS the frame there,
+       so comparisons false-positive."""
+    if not vision.enabled() or not segs:
+        return segs
+    cache: dict = {}
+
+    def frame(t: float):
+        t = round(t, 2)
+        if t not in cache:
+            cache[t] = _extract_frame_b64(source_path, t)
+        return cache[t]
+
+    def differ(ta: float, tb: float):
+        a, b = frame(ta), frame(tb)
+        if not a or not b:
+            return None
+        ans = vision.compare(a, b, _CHANGE_PROBE_QUESTION)
+        if not ans:
+            return None
+        up = ans.strip().upper()
+        if up.startswith("SAME"):
+            return False
+        if "CHANGED" in up:
+            return True
+        return None
+
+    prec = max(0.3, float(min_gap))
+
+    # 1) boundary verification — merge across boundaries the model calls SAME
+    out = [dict(segs[0])]
+    for s in segs[1:]:
+        b = s["t0"]
+        la, lb = max(t0, b - 1.2), min(t1, b + 1.2)
+        r = differ(la, lb) if (lb - la) >= 0.8 else None
+        if r is False:
+            prev = out[-1]
+            if (s["t1"] - s["t0"]) > (prev["t1"] - prev["t0"]):
+                prev["layout"], prev["side"] = s["layout"], s["side"]
+            prev["t1"] = s["t1"]
+        else:                      # CHANGED or inconclusive → trust the probes
+            out.append(dict(s))
+
+    # 2) movement flags inside long split/overlay segments
+    final: list = []
+    for s in out:
+        if s["layout"] not in ("split", "overlay") or (s["t1"] - s["t0"]) < 8.0:
+            final.append(s)
+            continue
+        a, b = s["t0"] + 0.5, s["t1"] - 0.5
+        if differ(a, b):
+            lo, hi = a, b
+            guard = 0
+            while hi - lo > prec and guard < 12:
+                mid = round((lo + hi) / 2.0, 2)
+                if differ(lo, mid):
+                    hi = mid
+                else:
+                    lo = mid
+                guard += 1
+            cut = round((lo + hi) / 2.0, 2)
+            if s["t0"] + 1.0 < cut < s["t1"] - 1.0:
+                final.append(dict(s, t1=cut))
+                final.append(dict(s, t0=cut))
+                continue
+        final.append(s)
+    return final
+
+
+def _segments_from_class_probes(source_path: Path, t0: float, t1: float, w: int, h: int,
+                                min_gap: float = 1.0, max_probes: int = 9):
+    """Fallback segmentation (the original path): probe spread frames, label
+    each (layout, side), smooth isolated flaky labels, merge equal runs, refine
+    boundaries by recursive bisection of CLASSIFICATIONS."""
     span = max(0.0, t1 - t0)
     n = min(max_probes, max(3, int(span // 6) + 2))
     pts = [t0 + span * (i + 0.5) / n for i in range(n)]   # interior — avoids cut frames

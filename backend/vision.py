@@ -133,6 +133,37 @@ def describe(image_b64: str, question: str, max_tokens: int = 80) -> Optional[st
         return None
 
 
+def compare(image_a_b64: str, image_b_b64: str, question: str,
+            max_tokens: int = 60) -> Optional[str]:
+    """Free-form short answer about TWO frames sent in one message (frame A
+    first, frame B second). Used by the layout change-flag probe: 'did the
+    panel geometry change between these frames?' — a binary comparison is far
+    more reliable than classifying each frame independently, so segment
+    boundaries come from comparisons and classification runs once per stable
+    segment."""
+    if not enabled():
+        return None
+    try:
+        resp = _client().chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": question},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image_a_b64}"}},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image_b_b64}"}},
+            ]}],
+            temperature=0,
+            max_tokens=max_tokens,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        return text or None
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("vision.compare failed: %s", e)
+        return None
+
+
 def detect_side(image_b64: str, subject: str = "the streamer's webcam panel (the live person talking to the camera)") -> Optional[str]:
     """Ask which horizontal side of the screen `subject` is on. Returns 'left' /
     'right' or None. Used to resolve the {side}/{other_side} prompt placeholders —
