@@ -78,6 +78,7 @@ _wake = threading.Event()       # set to nudge the worker when new work arrives
 _JOB_COLS = [
     "key", "id", "url", "start", "end", "title", "description",
     "prompt1", "prompt2", "context", "auto_context", "segment_seconds", "padding",
+    "step_seconds",
     "status", "message", "job_id", "video_path",
     "width", "height", "duration", "output_path", "filename",
 ]
@@ -111,7 +112,7 @@ def _init_db() -> None:
             key TEXT UNIQUE NOT NULL,
             id TEXT, url TEXT, start TEXT, "end" TEXT, title TEXT, description TEXT,
             prompt1 TEXT, prompt2 TEXT, context TEXT, auto_context TEXT,
-            segment_seconds REAL, padding REAL,
+            segment_seconds REAL, padding REAL, step_seconds REAL,
             status TEXT, message TEXT, job_id TEXT, video_path TEXT,
             width INTEGER, height INTEGER, duration REAL,
             output_path TEXT, filename TEXT
@@ -119,7 +120,8 @@ def _init_db() -> None:
         # Migrations for DBs created before these columns existed.
         for ddl in ("ALTER TABLE jobs ADD COLUMN padding REAL",
                     "ALTER TABLE jobs ADD COLUMN context TEXT",
-                    "ALTER TABLE jobs ADD COLUMN auto_context TEXT"):
+                    "ALTER TABLE jobs ADD COLUMN auto_context TEXT",
+                    "ALTER TABLE jobs ADD COLUMN step_seconds REAL"):
             try:
                 conn.execute(ddl)
             except sqlite3.OperationalError:
@@ -262,6 +264,11 @@ def _clip_to_job(url: str, clip: dict, default_context: str = "") -> dict:
         # hugging the subject; None → the autobox default (0.05).
         "padding": _to_float(clip.get("padding") if clip.get("padding") is not None
                              else clip.get("pad")),
+        # Optional per-clip temporal precision for switches/motion (seconds).
+        # 0.2 / 0.8 / 1.0 are the sensible choices; None → 0.2. Detection stays
+        # on a ~1s coarse grid and only subdivides where something changes.
+        "step_seconds": _to_float(clip.get("step") if clip.get("step") is not None
+                                  else clip.get("precision")),
         "status": "pending",
         "message": "queued",
         "job_id": None,                 # temp/{job_id}.mp4 once downloaded
@@ -423,13 +430,25 @@ def _observe_clip(src, dur: float) -> Optional[str]:
     return None
 
 
-def _predict_box(src, prompt: str, dur: float, padding=None) -> Optional[list]:
+def _norm_step(step) -> float:
+    """Per-clip temporal precision (s); 0.2 default, clamped to [0.2, 3]."""
+    return 0.2 if step is None else min(3.0, max(0.2, float(step)))
+
+
+def _predict_box(src, prompt: str, dur: float, padding=None, role=None,
+                 step=None, segments=None) -> Optional[list]:
     """Auto-box keyframes for one prompt over the whole clip, or None when the
-    prompt is empty / the vision endpoint is off / nothing is detected."""
+    prompt is empty / the vision endpoint is off / nothing is detected. `role`
+    ("streamer"/"content") tells fullscreen layout segments what this box is:
+    the box whose subject fills the screen → whole frame, the other → gap.
+    `step` = temporal precision in seconds (default 0.2); `segments` = the
+    clip's shared layout timeline so both boxes agree on it."""
     if not (prompt or "").strip() or not vision.enabled():
         return None
     pad = 0.05 if padding is None else max(0.0, float(padding))
-    out = autobox.predict_track(src, prompt, 0.0, dur, padding=pad, lock_size=True)
+    out = autobox.predict_track(src, prompt, 0.0, dur, padding=pad, lock_size=True,
+                                role=role, step_seconds=_norm_step(step),
+                                segments=segments)
     return out.get("keyframes") or None
 
 
@@ -474,14 +493,44 @@ def _process_one(job: dict) -> None:
             return " ".join(s for s in (obs, ctx, p) if s)
 
         notes = []
-        box1 = _predict_box(src, merged(job.get("prompt1", "")), dur, padding=pad)
+        stp = job.get("step_seconds")
+        p1m, p2m = merged(job.get("prompt1", "")), merged(job.get("prompt2", ""))
+        # ONE shared layout timeline per clip — both boxes must agree on what
+        # each stretch is (independent probing can label the same stretch
+        # fullscreen-webcam for box1 but fullscreen-content for box2 → both
+        # boxes real at once, the reel shows the same frame twice)
+        segs = None
+        w_, h_ = job.get("width") or 0, job.get("height") or 0
+        if (w_ and h_ and vision.enabled()
+                and any(t in (p1m + p2m) for t in ("{side}", "{other_side}", "{layout}"))):
+            segs = autobox.detect_layout_segments(src, 0.0, dur, w_, h_,
+                                                  min_gap=_norm_step(stp))
+            if segs:
+                notes.append("layout: " + " · ".join(
+                    f"{s['layout']}{'(' + s['side'] + ')' if s['side'] else ''} "
+                    f"{s['t0']:.1f}–{s['t1']:.1f}s" for s in segs))
+        # box1 = the streamer (AREA 1), box2 = the content (AREA 2) — the same
+        # convention the {side}/{layout} placeholders and the geometric side
+        # probe are built on
+        box1 = _predict_box(src, p1m, dur, padding=pad,
+                            role="streamer", step=stp, segments=segs)
         if job.get("prompt1") and not box1:
             notes.append("box1: nothing detected")
         box2 = None
         if NUM_BOXES >= 2:
-            box2 = _predict_box(src, merged(job.get("prompt2", "")), dur, padding=pad)
+            box2 = _predict_box(src, p2m, dur, padding=pad,
+                                role="content", step=stp, segments=segs)
             if job.get("prompt2") and not box2:
                 notes.append("box2: nothing detected")
+            if box1 and box2:
+                # both boxes gap at once = a fullscreen blip the probes couldn't
+                # see → one box must carry the full frame there (else the reel
+                # goes black); a classification probe decides which
+                w_, h_ = job.get("width") or 0, job.get("height") or 0
+                if w_ and h_:
+                    box1, box2 = autobox.merge_double_gaps(
+                        box1, box2, w_, h_,
+                        classify=lambda t: autobox.classify_fullscreen_owner(src, t, w_, h_))
     except Exception as e:  # noqa: BLE001 — download already succeeded; boxes are best-effort
         log.warning("queue predict failed (%s): %s", job["id"], e)
         _update(key, status="ready", box1=None, box2=None,

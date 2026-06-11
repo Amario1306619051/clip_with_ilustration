@@ -138,6 +138,9 @@ def api_autobox(req: AutoBoxRequest):
             src, req.prompt, req.t_start, req.t_end,
             step_seconds=req.step_seconds, padding=req.padding, smooth=req.smooth,
             lock_size=req.lock_size,
+            # the single crop box follows the streamer — tells fullscreen layout
+            # segments to use the whole frame (only matters with {layout} prompts)
+            role={1: "streamer"}.get(req.box),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
