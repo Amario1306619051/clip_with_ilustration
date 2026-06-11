@@ -377,14 +377,14 @@ def _detect_layout_segments(source_path: Path, t0: float, t1: float, w: int, h: 
     if not segs:
         return segs
     try:
-        segs = _refine_with_change_flags(source_path, segs, t0, t1, min_gap)
+        segs = _refine_with_change_flags(source_path, segs, t0, t1, min_gap, w, h)
     except Exception as e:  # noqa: BLE001 — refinement is best-effort
         log.warning("change-flag refinement failed (kept probe segments): %s", e)
     return segs
 
 
 def _refine_with_change_flags(source_path: Path, segs: list, t0: float, t1: float,
-                              min_gap: float) -> list:
+                              min_gap: float, w: int = 0, h: int = 0) -> list:
     """Comparison pass over probe-detected segments:
     1. Each boundary is straddled with one 'did anything change?' probe
        (±1.2s). SAME → the boundary was classification noise → the two
@@ -435,7 +435,10 @@ def _refine_with_change_flags(source_path: Path, segs: list, t0: float, t1: floa
         else:                      # CHANGED or inconclusive → trust the probes
             out.append(dict(s))
 
-    # 2) movement flags inside long split/overlay segments
+    # 2) movement flags inside long split/overlay segments. The flagged change
+    #    can be a panel move (same layout) OR a misplaced probe boundary (the
+    #    half before the cut is actually fullscreen) — so each half is
+    #    RE-CLASSIFIED at its midpoint and relabeled when the probe disagrees.
     final: list = []
     for s in out:
         if s["layout"] not in ("split", "overlay") or (s["t1"] - s["t0"]) < 8.0:
@@ -454,8 +457,18 @@ def _refine_with_change_flags(source_path: Path, segs: list, t0: float, t1: floa
                 guard += 1
             cut = round((lo + hi) / 2.0, 2)
             if s["t0"] + 1.0 < cut < s["t1"] - 1.0:
-                final.append(dict(s, t1=cut))
-                final.append(dict(s, t0=cut))
+                # probe each half once — keep the original label only when the
+                # half really is that layout (a flagged change right after a
+                # boundary usually means the boundary itself was early)
+                halves = []
+                for ha, hb in ((s["t0"], cut), (cut, s["t1"])):
+                    lab = (_classify_layout(source_path, (ha + hb) / 2.0, w, h)
+                           if w and h else None)
+                    seg = dict(s, t0=ha, t1=hb)
+                    if lab and lab[0] in ("full", "fullcontent"):
+                        seg["layout"], seg["side"] = lab[0], None
+                    halves.append(seg)
+                final.extend(halves)
                 continue
         final.append(s)
     return final
@@ -739,6 +752,57 @@ def resolve_split_overlap(kfs1: list, kfs2: list, w: int, h: int,
             if r:
                 k["x"], k["w"] = r
     return out1, out2
+
+
+def expand_content_to_seam(kfs1: list, kfs2: list, w: int, h: int) -> list:
+    """In a true left/right SPLIT, the content area IS the geometric complement
+    of the streamer panel: everything from the shared seam to the frame edge
+    ('edge to edge' — the owner's bbox_2 spec). The model frequently under-boxes
+    the content (a poster inside the panel, half the panel, etc.), and no
+    overlap-snap can fix an UNDERSIZED box — so whenever box1 (streamer) is a
+    full-height, edge-anchored partial panel at some time, box2's box there is
+    REPLACED with the complement rectangle. Fullscreen and overlay/PiP segments
+    are untouched. Returns the new kfs2."""
+    if not kfs1 or not kfs2:
+        return kfs2
+    inf = float("inf")
+
+    def reign(kfs, i):
+        return kfs[i]["t"], (kfs[i + 1]["t"] if i + 1 < len(kfs) else inf)
+
+    def is_split_panel(b1):
+        return (not b1.get("gap")
+                and b1["w"] < 0.85 * w              # partial panel, not fullscreen
+                and b1["h"] > 0.90 * h)             # full height → side-by-side split
+
+    out = []
+    for j, k in enumerate(kfs2):
+        k = dict(k)
+        if not k.get("gap"):
+            a2, b2 = reign(kfs2, j)
+            # the box2 kf's reign can span several box1 segments (boundaries
+            # don't always align) → use the box1 panel that overlaps it LONGEST
+            best, best_ov = None, 0.0
+            for i, b1 in enumerate(kfs1):
+                if not is_split_panel(b1):
+                    continue
+                a1, b1e = reign(kfs1, i)
+                ov = min(b2, b1e) - max(a2, a1)
+                if ov > best_ov:
+                    best, best_ov = b1, ov
+            if best is not None and best_ov > 0:
+                if best["x"] < 0.05 * w:            # streamer LEFT → content = seam..right edge
+                    seam = best["x"] + best["w"]
+                    if seam < w - 2:
+                        k["x"], k["y"] = seam, 0.0
+                        k["w"], k["h"] = w - seam, float(h)
+                elif best["x"] + best["w"] > 0.95 * w:  # streamer RIGHT → content = left edge..seam
+                    seam = best["x"]
+                    if seam > 2:
+                        k["x"], k["y"] = 0.0, 0.0
+                        k["w"], k["h"] = seam, float(h)
+        out.append(k)
+    return out
 
 
 def predict_track(
