@@ -34,6 +34,7 @@ import json
 import logging
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -64,9 +65,17 @@ RENDER_IN_QUEUE = False
 CAPTION_FONT = "Anton"   # batch render caption defaults (match the UI default)
 CAPTION_SIZE = 64
 
-# Statuses:
-#   pending → downloading → predicting → ready          (auto, on import)
-#   ready → render_queued → rendering → done            (on demand, after editing)
+# Stage concurrency (per the device). Download is I/O-bound → parallelize;
+# boxing hammers the vision endpoint → keep ONE; render is heavy (Whisper + NVENC)
+# but the owner wants two at a time. Each stage is its own pool of worker threads
+# that atomically CLAIM jobs from its input status, so no two grab the same clip.
+DOWNLOAD_WORKERS = 2
+BOXING_WORKERS = 1
+RENDER_WORKERS = 2
+
+# Statuses (download and boxing are now SEPARATE stages so they parallelize):
+#   pending → downloading → downloaded → predicting → ready   (auto, on import)
+#   ready → render_queued → rendering → done                  (on demand, after editing)
 #   → error at any step
 _TERMINAL = {"ready", "done", "error"}
 
@@ -433,8 +442,8 @@ def _observe_clip(src, dur: float) -> Optional[str]:
 
 
 def _norm_step(step) -> float:
-    """Per-clip temporal precision (s); 0.2 default, clamped to [0.2, 3]."""
-    return 0.2 if step is None else min(3.0, max(0.2, float(step)))
+    """Per-clip temporal precision (s); 0.4 default, clamped to [0.2, 3]."""
+    return 0.4 if step is None else min(3.0, max(0.2, float(step)))
 
 
 def _predict_box(src, prompt: str, dur: float, padding=None, role=None,
@@ -454,11 +463,13 @@ def _predict_box(src, prompt: str, dur: float, padding=None, role=None,
     return out.get("keyframes") or None
 
 
-def _process_one(job: dict) -> None:
+def _download_one(job: dict) -> None:
+    """Stage 1 (download pool): yt-dlp the clip, then hand off to the boxing
+    stage via the `downloaded` status. Status is already `downloading` (set
+    atomically by the claim). A clip downloaded on a previous run skips straight
+    through."""
     key = job["key"]
-    # 1) download (skip if already downloaded on a previous run)
     if not job.get("job_id"):
-        _update(key, status="downloading", message="downloading clip…")
         try:
             res = downloader.download(job["url"], job.get("start") or "00:00:00",
                                       job.get("end"), job.get("title") or "clip")
@@ -466,11 +477,15 @@ def _process_one(job: dict) -> None:
             log.warning("queue download failed (%s): %s", job["id"], e)
             _update(key, status="error", message=f"download failed: {e}")
             return
-        job = _update(key, job_id=res["job_id"], video_path=res["video_path"],
-                      width=res["width"], height=res["height"], duration=res["duration"]) or job
+        _update(key, job_id=res["job_id"], video_path=res["video_path"],
+                width=res["width"], height=res["height"], duration=res["duration"])
+    _update(key, status="downloaded", message="downloaded — waiting to box…")
 
-    # 2) predict boxes
-    _update(key, status="predicting", message="predicting boxes (AI)…")
+
+def _predict_boxes(job: dict) -> None:
+    """Stage 2 (boxing pool, single worker): auto-box the downloaded clip. Status
+    is already `predicting` (set atomically by the claim)."""
+    key = job["key"]
     try:
         src = downloader.get_source_path(job["job_id"])
         dur = job.get("duration") or 0.0
@@ -533,6 +548,10 @@ def _process_one(job: dict) -> None:
                     box1, box2 = autobox.merge_double_gaps(
                         box1, box2, w_, h_,
                         classify=lambda t: autobox.classify_fullscreen_owner(src, t, w_, h_))
+                    # the two split panels often overlap a little on the seam
+                    # (streamer box too wide / content box too far in) → snap
+                    # both edges to a shared divider so the crops don't double up
+                    box1, box2 = autobox.resolve_split_overlap(box1, box2, w_, h_)
     except Exception as e:  # noqa: BLE001 — download already succeeded; boxes are best-effort
         log.warning("queue predict failed (%s): %s", job["id"], e)
         _update(key, status="ready", box1=None, box2=None,
@@ -590,25 +609,34 @@ def _render_one(job: dict) -> None:
             message=f"done — {out['filename']}")
 
 
-def _next_actionable():
-    """First job needing work, in insertion order: a `pending` one to
-    download+predict, or a `render_queued` one to render. Returns (job, kind)."""
+def _claim_next(from_status: str, to_status: str, message: str):
+    """Atomically claim the oldest job in `from_status`: flip it to `to_status`
+    and return it, or None when the stage's inbox is empty. All DB access is
+    serialized by `_lock`, so two pool threads can never grab the same row."""
     with _lock, _db() as conn:
         row = conn.execute(
-            "SELECT * FROM jobs WHERE status IN ('pending','render_queued') "
-            "ORDER BY seq LIMIT 1").fetchone()
+            "SELECT * FROM jobs WHERE status=? ORDER BY seq LIMIT 1",
+            (from_status,)).fetchone()
         if not row:
-            return None, None
-        kind = "render" if row["status"] == "render_queued" else "process"
-        return _row_to_job(conn, row), kind
+            return None
+        conn.execute("UPDATE jobs SET status=?, message=? WHERE key=?",
+                     (to_status, message, row["key"]))
+        job = _row_to_job(conn, row)
+        job["status"] = to_status
+        return job
 
 
 def _reset_interrupted() -> None:
-    """A job left mid-flight by a restart resumes from the start of its phase."""
+    """A job left mid-flight by a restart resumes from the start of its phase.
+    Mid-`predicting` jobs already have the clip on disk → back to `downloaded`
+    (straight to the boxing inbox), not all the way to `pending`."""
     with _lock, _db() as conn:
         conn.execute(
             "UPDATE jobs SET status='pending', message='re-queued after restart' "
-            "WHERE status IN ('downloading','predicting')")
+            "WHERE status='downloading' OR (status='predicting' AND job_id IS NULL)")
+        conn.execute(
+            "UPDATE jobs SET status='downloaded', message='re-queued boxing after restart' "
+            "WHERE status='predicting' AND job_id IS NOT NULL")
         conn.execute(
             "UPDATE jobs SET status='render_queued', message='re-queued render after restart' "
             "WHERE status='rendering'")
@@ -640,25 +668,33 @@ def _migrate_json_if_any() -> None:
         pass
 
 
-def _worker_loop() -> None:
+def _stage_loop(name: str, from_status: str, to_status: str,
+                claim_msg: str, work) -> None:
+    """One pool thread: claim jobs from this stage's inbox and run `work` on
+    each. Sleeps on `_wake` (or a 5s poll) when the inbox is empty. The wake
+    Event is shared by every pool — a spurious wake just re-checks and sleeps."""
     while True:
-        job, kind = _next_actionable()
+        job = _claim_next(from_status, to_status, claim_msg)
         if job is None:
+            # The Event is shared by every pool thread. Let all waiters see a
+            # set() before anyone clears it (the 50ms grace), then clear so the
+            # next wait blocks again; the 5s poll bounds any missed wake.
             _wake.wait(timeout=5)
+            time.sleep(0.05)
             _wake.clear()
             continue
         try:
-            if kind == "render":
-                _render_one(job)
-            else:
-                _process_one(job)
-        except Exception as e:  # noqa: BLE001 — never let the worker thread die
-            log.exception("queue worker crashed on %s: %s", job.get("id"), e)
-            _update(job["key"], status="error", message=f"worker error: {e}")
+            work(job)
+        except Exception as e:  # noqa: BLE001 — never let a pool thread die
+            log.exception("queue %s worker crashed on %s: %s", name, job.get("id"), e)
+            _update(job["key"], status="error", message=f"{name} error: {e}")
+        _wake.set()   # hand-off: nudge downstream stages immediately
 
 
 def start_worker() -> None:
-    """Idempotent — call once at app startup."""
+    """Idempotent — call once at app startup. Spawns the per-stage pools:
+    DOWNLOAD_WORKERS yt-dlp threads, BOXING_WORKERS vision threads (1 — don't
+    hammer the endpoint), RENDER_WORKERS transcribe+render threads."""
     global _worker_started
     with _lock:
         if _worker_started:
@@ -667,7 +703,19 @@ def start_worker() -> None:
         _init_db()
         _migrate_json_if_any()
         _reset_interrupted()
-    threading.Thread(target=_worker_loop, daemon=True, name="queue-worker").start()
+    stages = (
+        [("download", "pending", "downloading", "downloading clip…",
+          _download_one)] * DOWNLOAD_WORKERS
+        + [("boxing", "downloaded", "predicting", "predicting boxes (AI)…",
+            _predict_boxes)] * BOXING_WORKERS
+        + ([("render", "render_queued", "rendering", "transcribing (Whisper)…",
+             _render_one)] * RENDER_WORKERS if RENDER_IN_QUEUE else [])
+    )
+    for i, (name, frm, to, msg, work) in enumerate(stages):
+        threading.Thread(target=_stage_loop, args=(name, frm, to, msg, work),
+                         daemon=True, name=f"queue-{name}-{i}").start()
     with _db() as conn:
         n = conn.execute("SELECT COUNT(*) AS c FROM jobs").fetchone()["c"]
-    log.info("queue worker started (%d job(s) in db)", n)
+    log.info("queue pools started (download×%d boxing×%d render×%d, %d job(s) in db)",
+             DOWNLOAD_WORKERS, BOXING_WORKERS,
+             RENDER_WORKERS if RENDER_IN_QUEUE else 0, n)

@@ -148,6 +148,7 @@ video.addEventListener('timeupdate', () => {
   $('#time-cur').textContent = fmtTime(video.currentTime);
   $('#cur-time').textContent = video.currentTime.toFixed(2) + 's';
   updateTimelineCursor();
+  updateKfListHighlight();
   drawOverlay();
   drawPreview($('#preview'));
 });
@@ -413,12 +414,17 @@ function renderKfList() {
   if (!kfs.length) { ol.innerHTML = '<li class="muted">No keyframes yet.</li>'; return; }
   kfs.forEach((k, i) => {
     const next = kfs[i + 1];
-    const tEnd = next ? next.t.toFixed(2) + 's' : 'end';
     const cur = state.currentTime >= k.t && (!next || state.currentTime < next.t);
     const li = document.createElement('li');
     li.className = 'kf-row' + (cur ? ' current' : '');
+    // Editable start/end — click a time to lengthen/shorten the segment
+    // (start = this kf's t, end = the NEXT kf's t; clip end isn't editable).
     li.innerHTML = `
-      <span class="kf-seg">[${k.t.toFixed(2)}s → ${tEnd}]</span>
+      <span class="kf-seg">[<span class="kf-tedit" data-i="${i}" data-which="start"
+        title="Click to edit when this segment STARTS (lengthen/shorten)">${k.t.toFixed(2)}s</span> → ${
+        next ? `<span class="kf-tedit" data-i="${i}" data-which="end"
+        title="Click to edit when this segment ENDS (moves the next keyframe)">${next.t.toFixed(2)}s</span>` : 'end'}]</span>
+      <span class="kf-onscreen" title="this segment is what's on screen at the playhead right now">▶ ON SCREEN</span>
       <span class="kf-dim">${Math.round(k.w)}×${Math.round(k.h)} @(${Math.round(k.x)},${Math.round(k.y)})</span>
       <button class="kf-tag" data-i="${i}" data-act="interp">${(k.interp || 'hold') === 'linear' ? 'PAN→' : 'HOLD'}</button>
       <button class="kf-tag" data-i="${i}" data-act="fit">${k.fit === 'blur_pad' ? 'BLUR' : 'COVER'}</button>
@@ -435,6 +441,66 @@ function renderKfList() {
     else if (act === 'del') { state.box = state.box.filter((x) => x !== k); }
     refreshKfUI();
   }));
+  ol.querySelectorAll('.kf-tedit').forEach((sp) => sp.addEventListener('click', () => startKfTimeEdit(sp)));
+}
+
+// Live "which segment is on screen" highlight while the video plays — class
+// toggles only (no HTML rebuild, so an in-progress time edit is never destroyed).
+function updateKfListHighlight() {
+  const ol = $('#kf-items-1');
+  if (!ol) return;
+  const kfs = sortedKfs();
+  ol.querySelectorAll('li.kf-row').forEach((li, i) => {
+    const k = kfs[i];
+    if (!k) return;
+    const next = kfs[i + 1];
+    li.classList.toggle('current', state.currentTime >= k.t && (!next || state.currentTime < next.t));
+  });
+}
+
+// A segment runs [kf[i].t, kf[i+1].t). Editing its START moves this kf's t;
+// editing its END moves the NEXT kf's t — clamped between neighbors so order
+// (and every other segment) stays intact. This is how a segment is
+// lengthened/shortened from the list.
+function startKfTimeEdit(span) {
+  const i = +span.dataset.i, which = span.dataset.which;
+  const kfs = sortedKfs();
+  const target = which === 'start' ? kfs[i] : kfs[i + 1];
+  if (!target) return;
+  const dur = video.duration || state.duration || Infinity;
+  const EPS = 0.05;
+  let lo, hi;
+  if (which === 'start') {
+    lo = i > 0 ? kfs[i - 1].t + EPS : 0;
+    hi = (i + 1 < kfs.length ? kfs[i + 1].t : dur) - EPS;
+  } else {
+    lo = kfs[i].t + EPS;
+    hi = (i + 2 < kfs.length ? kfs[i + 2].t : dur) - EPS;
+  }
+  hi = Math.max(lo, hi);
+  const input = document.createElement('input');
+  input.type = 'number';
+  input.step = '0.1';
+  input.min = lo.toFixed(2);
+  input.max = hi.toFixed(2);
+  input.value = target.t.toFixed(2);
+  input.className = 'kf-tedit-input';
+  span.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const v = parseFloat(input.value);
+    if (!isNaN(v)) target.t = Math.min(hi, Math.max(lo, v));
+    refreshKfUI();
+  };
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') commit();
+    else if (ev.key === 'Escape') { done = true; refreshKfUI(); }
+  });
+  input.addEventListener('blur', commit);
 }
 
 // ───────────────────────── preview canvas ─────────────────────────
@@ -719,7 +785,7 @@ async function doAutoBox() {
   const dur = state.duration || video.duration || 0;
   const t0 = Math.max(0, state.autoRange.start || 0);
   const t1 = state.autoRange.end == null ? dur : state.autoRange.end;
-  const step = Number($('#ab-density').value) || 0.2;
+  const step = Number($('#ab-density').value) || 0.4;
   const btn = $('#ab-generate');
   btn.disabled = true;
   setStatus($('#ab-status'),
@@ -998,7 +1064,7 @@ if (thumbVideo && thumbCanvas) {
 // the background (persisted across restarts). Open a ready job to fine-tune the
 // single crop box (auto-saved back), delete when done.
 function qStatusBadge(s) {
-  const label = { pending: 'queued', downloading: 'downloading', predicting: 'boxing', ready: 'ready', error: 'error' }[s] || s;
+  const label = { pending: 'queued', downloading: 'downloading', downloaded: 'boxing queued', predicting: 'boxing', ready: 'ready', error: 'error' }[s] || s;
   return `<span class="q-badge ${s}">${label}</span>`;
 }
 
@@ -1016,7 +1082,7 @@ function renderQueueList(jobs) {
   if (!ul) return;
   if (!jobs.length) { ul.innerHTML = ''; if (meta) meta.textContent = 'No jobs queued.'; return; }
   const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
-  const working = (c.pending || 0) + (c.downloading || 0) + (c.predicting || 0);
+  const working = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0);
   if (meta) meta.textContent = `${jobs.length} job(s) · ${c.ready || 0} ready · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
   ul.innerHTML = jobs.map((j) => {
     const active = j.key === state.activeQueueKey ? ' active' : '';
