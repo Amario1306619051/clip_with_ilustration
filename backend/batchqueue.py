@@ -77,7 +77,7 @@ _wake = threading.Event()       # set to nudge the worker when new work arrives
 # jobs table = these scalar columns (box keyframes live in the keyframes table).
 _JOB_COLS = [
     "key", "id", "url", "start", "end", "title", "description",
-    "prompt1", "prompt2", "segment_seconds",
+    "prompt1", "prompt2", "context", "auto_context", "segment_seconds", "padding",
     "status", "message", "job_id", "video_path",
     "width", "height", "duration", "output_path", "filename",
 ]
@@ -110,11 +110,20 @@ def _init_db() -> None:
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             key TEXT UNIQUE NOT NULL,
             id TEXT, url TEXT, start TEXT, "end" TEXT, title TEXT, description TEXT,
-            prompt1 TEXT, prompt2 TEXT, segment_seconds REAL,
+            prompt1 TEXT, prompt2 TEXT, context TEXT, auto_context TEXT,
+            segment_seconds REAL, padding REAL,
             status TEXT, message TEXT, job_id TEXT, video_path TEXT,
             width INTEGER, height INTEGER, duration REAL,
             output_path TEXT, filename TEXT
         )''')
+        # Migrations for DBs created before these columns existed.
+        for ddl in ("ALTER TABLE jobs ADD COLUMN padding REAL",
+                    "ALTER TABLE jobs ADD COLUMN context TEXT",
+                    "ALTER TABLE jobs ADD COLUMN auto_context TEXT"):
+            try:
+                conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass  # column already there
         conn.execute('''CREATE TABLE IF NOT EXISTS keyframes (
             job_key TEXT NOT NULL,
             box INTEGER NOT NULL,
@@ -225,7 +234,7 @@ def _to_float(v) -> Optional[float]:
         return None
 
 
-def _clip_to_job(url: str, clip: dict) -> dict:
+def _clip_to_job(url: str, clip: dict, default_context: str = "") -> dict:
     cid = str(clip.get("id") or uuid.uuid4().hex[:8])
     return {
         "key": uuid.uuid4().hex[:12],   # internal, URL-safe id used by the API
@@ -237,10 +246,22 @@ def _clip_to_job(url: str, clip: dict) -> dict:
         "description": str(clip.get("description") or ""),
         "prompt1": str(clip.get("bbox_1") or clip.get("bbox1") or ""),
         "prompt2": str(clip.get("bbox_2") or clip.get("bbox2") or ""),
+        # Shared "system" context prepended to BOTH box prompts at predict time —
+        # describe the layout once (per-clip "context", or the file-level
+        # "_context" default) and keep bbox_1/bbox_2 as short instructions.
+        "context": str(clip.get("context") or clip.get("system") or default_context or ""),
+        # Filled by the worker after download: the model "studies" a frame first
+        # and writes its own observation (streamer appearance, content type) —
+        # merged as [observation] + [context] + [bbox prompt].
+        "auto_context": None,
         # Optional per-clip illustration segment length (illustrator only) — pre-fills
         # the Illustration step so the user just picks. Ignored by clipper.
         "segment_seconds": _to_float(clip.get("segment_seconds")
                                      or clip.get("seg_seconds") or clip.get("jeda")),
+        # Optional per-clip auto-box padding (fraction per side). 0 = tight box
+        # hugging the subject; None → the autobox default (0.05).
+        "padding": _to_float(clip.get("padding") if clip.get("padding") is not None
+                             else clip.get("pad")),
         "status": "pending",
         "message": "queued",
         "job_id": None,                 # temp/{job_id}.mp4 once downloaded
@@ -257,6 +278,9 @@ def import_text(content: str) -> dict:
     data = _parse(content)
     if not isinstance(data, dict):
         raise ValueError("top level must be an object keyed by video URL")
+    # File-level shared context: a top-level "_context" key (underscore = clearly
+    # not a URL) becomes the default `context` for every clip in the file.
+    default_context = str(data.pop("_context", "") or "")
 
     added, skipped = 0, 0
     with _lock, _db() as conn:
@@ -267,7 +291,7 @@ def import_text(content: str) -> dict:
             for clip in clips:
                 if not isinstance(clip, dict):
                     continue
-                job = _clip_to_job(str(url), clip)
+                job = _clip_to_job(str(url), clip, default_context)
                 if job["id"] in existing_ids:
                     skipped += 1
                     continue
@@ -375,12 +399,37 @@ def delete_job(key: str, cleanup: bool = True) -> bool:
 
 
 # ───────────────────────── background worker ─────────────────────────
-def _predict_box(src, prompt: str, dur: float) -> Optional[list]:
+_OBSERVE_QUESTION = (
+    "Look at this video frame from a reaction stream. In ONE short sentence, "
+    "describe the live streamer in the webcam panel (gender, skin tone, clothing, "
+    "accessories). Then in ONE short sentence, describe what kind of content the "
+    "other panel shows. Be factual and concise. Do NOT mention left/right/top/"
+    "bottom positions. Answer with the two sentences only."
+)
+
+
+def _observe_clip(src, dur: float) -> Optional[str]:
+    """Let the model study the clip before boxing: describe a mid-clip frame
+    (streamer appearance + content type). Falls back to an early frame. Returns
+    the observation text or None — boxing proceeds without it on failure."""
+    for t in (max(0.5, dur / 2.0), 1.0):
+        b64 = autobox._extract_frame_b64(src, t)
+        if not b64:
+            continue
+        obs = vision.describe(b64, _OBSERVE_QUESTION)
+        if obs:
+            # keep it one line and bounded — it's a prompt prefix, not an essay
+            return " ".join(obs.split())[:400]
+    return None
+
+
+def _predict_box(src, prompt: str, dur: float, padding=None) -> Optional[list]:
     """Auto-box keyframes for one prompt over the whole clip, or None when the
     prompt is empty / the vision endpoint is off / nothing is detected."""
     if not (prompt or "").strip() or not vision.enabled():
         return None
-    out = autobox.predict_track(src, prompt, 0.0, dur, lock_size=True)
+    pad = 0.05 if padding is None else max(0.0, float(padding))
+    out = autobox.predict_track(src, prompt, 0.0, dur, padding=pad, lock_size=True)
     return out.get("keyframes") or None
 
 
@@ -404,13 +453,33 @@ def _process_one(job: dict) -> None:
     try:
         src = downloader.get_source_path(job["job_id"])
         dur = job.get("duration") or 0.0
+        pad = job.get("padding")   # per-clip from the JSON; None → autobox default
+        ctx = (job.get("context") or "").strip()
+
+        # The model studies the video FIRST: one observation of a mid-clip frame
+        # (streamer appearance + content type, deliberately WITHOUT sides — the
+        # geometric {side} probe is more reliable for that). Generated once per
+        # job, persisted, and prepended to both box prompts.
+        obs = (job.get("auto_context") or "").strip()
+        if not obs and vision.enabled():
+            obs = _observe_clip(src, dur) or ""
+            if obs:
+                _update(key, auto_context=obs)
+
+        def merged(p: str) -> str:
+            # [model observation] + [shared context] + [per-box instruction].
+            p = (p or "").strip()
+            if not p:
+                return p
+            return " ".join(s for s in (obs, ctx, p) if s)
+
         notes = []
-        box1 = _predict_box(src, job.get("prompt1", ""), dur)
+        box1 = _predict_box(src, merged(job.get("prompt1", "")), dur, padding=pad)
         if job.get("prompt1") and not box1:
             notes.append("box1: nothing detected")
         box2 = None
         if NUM_BOXES >= 2:
-            box2 = _predict_box(src, job.get("prompt2", ""), dur)
+            box2 = _predict_box(src, merged(job.get("prompt2", "")), dur, padding=pad)
             if job.get("prompt2") and not box2:
                 notes.append("box2: nothing detected")
     except Exception as e:  # noqa: BLE001 — download already succeeded; boxes are best-effort

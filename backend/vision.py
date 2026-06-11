@@ -108,6 +108,63 @@ def _parse_boxes(text: str) -> list[tuple]:
     return out
 
 
+def describe(image_b64: str, question: str, max_tokens: int = 80) -> Optional[str]:
+    """Free-form short answer about a frame (used by auto-context: the model
+    "studies" the video first — e.g. describes the streamer's appearance — and
+    that description is then baked into the box prompts)."""
+    if not enabled():
+        return None
+    try:
+        resp = _client().chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": question},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+            ]}],
+            temperature=0,
+            max_tokens=max_tokens,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        return text or None
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("vision.describe failed: %s", e)
+        return None
+
+
+def detect_side(image_b64: str, subject: str = "the streamer's webcam panel (the live person talking to the camera)") -> Optional[str]:
+    """Ask which horizontal side of the screen `subject` is on. Returns 'left' /
+    'right' or None. Used to resolve the {side}/{other_side} prompt placeholders —
+    empirically the model boxes panels FAR better when told the concrete side, so
+    we probe the side first instead of asking position-agnostically."""
+    if not enabled():
+        return None
+    try:
+        resp = _client().chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text":
+                    f"On which side of this screen is {subject}? "
+                    "Answer with exactly one word: left or right."},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+            ]}],
+            temperature=0,
+            max_tokens=10,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        text = (resp.choices[0].message.content or "").strip().lower()
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("vision.detect_side failed: %s", e)
+        return None
+    if "left" in text:
+        return "left"
+    if "right" in text:
+        return "right"
+    return None
+
+
 def detect_box(image_b64: str, prompt: str, frame_w: int, frame_h: int) -> Optional[dict]:
     """Return {x,y,w,h} in SOURCE PIXELS for the prompted subject, or None when the
     model finds nothing. frame_w/frame_h are the SOURCE dimensions (the image may
