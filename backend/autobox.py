@@ -792,6 +792,16 @@ def predict_track(
                               "gap": True})
     keyframes = _dedupe_keyframes(keyframes)
 
+    # Per-box defaults (owner's spec): box1/streamer = hold + cover, box2/content
+    # = hold + blur_pad (content panels keep their full AR, blurred padding).
+    # hold > linear as default — panels are static; the user edits per-kf anyway.
+    if role in ("streamer", "content"):
+        fit_default = "cover" if role == "streamer" else "blur_pad"
+        for k in keyframes:
+            if not k.get("gap"):
+                k["interp"] = "hold"
+                k["fit"] = fit_default
+
     return {
         "keyframes": keyframes,
         "sampled": len(results),
