@@ -349,7 +349,12 @@ def _classify_layout(source_path: Path, t: float, w: int, h: int):
                 clear = (c["x"] + c["w"]) <= p["x"] + 0.08 * w
             if clear:
                 return ("split", p_side)
-        return ("full", None)
+        # No corroborating content beside an edge-anchored panel is AMBIGUOUS,
+        # not proof of fullscreen: the content probe also just misses (e.g. a
+        # dark vertical video) — answering 'full' here systematically poisoned
+        # a whole clip on a second streamer's footage. Leave it inconclusive
+        # and let the neighboring probes decide.
+        return None
     c = vision.detect_box(b64, _CONTENT_PROBE_PROMPT, w, h)
     c_huge = _geom(c, w, h)[0]
     if p is None:
@@ -363,6 +368,22 @@ def _classify_layout(source_path: Path, t: float, w: int, h: int):
         if ans.startswith("yes"):
             return ("overlay", p_side)
         return None
+    if not p_small:
+        # Medium person box NOT anchored to an edge — a fullscreen TORSO shot.
+        # The 'huge' rule assumes the person fills the frame, but a streamer
+        # framed from the waist up in a room covers only ~40-50% and sits
+        # mid-frame (found on a second streamer's footage — every fullscreen
+        # frame came back inconclusive and caught the neighbors' overlay
+        # label). Only call it fullscreen when the content probe found nothing
+        # CLEAR of the person; content beside a centered person stays
+        # inconclusive (neighbors fill it).
+        edge = p["x"] <= 0.05 * w or (p["x"] + p["w"]) >= 0.95 * w
+        if not edge:
+            if c is None:
+                return ("full", None)
+            cx = c["x"] + c["w"] / 2.0
+            if p["x"] - 0.04 * w <= cx <= p["x"] + p["w"] + 0.04 * w:
+                return ("full", None)   # "content" box sits ON the person → same shot
     return None
 
 
@@ -403,10 +424,120 @@ def _detect_layout_segments(source_path: Path, t0: float, t1: float, w: int, h: 
     except Exception as e:  # noqa: BLE001 — refinement is best-effort
         log.warning("change-flag refinement failed (kept probe segments): %s", e)
     try:
+        segs = _sanity_split_segments(source_path, segs, w, h, min_gap)
+    except Exception as e:  # noqa: BLE001 — sanity split is best-effort
+        log.warning("sanity split failed (kept segments): %s", e)
+    try:
         segs = _polish_boundaries(source_path, segs, w, h, min_gap)
     except Exception as e:  # noqa: BLE001 — polish is best-effort
         log.warning("boundary polish failed (kept segments): %s", e)
     return segs
+
+
+def _make_frame_differ(source_path: Path):
+    """Shared change-flag helper: a `differ(ta, tb) -> True/False/None` closure
+    over a frame cache, asking the model whether the panel GEOMETRY changed
+    between two frames."""
+    cache: dict = {}
+
+    def frame(t: float):
+        t = round(t, 2)
+        if t not in cache:
+            cache[t] = _extract_frame_b64(source_path, t)
+        return cache[t]
+
+    def differ(ta: float, tb: float):
+        a, b = frame(ta), frame(tb)
+        if not a or not b:
+            return None
+        ans = vision.compare(a, b, _CHANGE_PROBE_QUESTION)
+        if not ans:
+            return None
+        up = ans.strip().upper()
+        if up.startswith("SAME"):
+            return False
+        if "CHANGED" in up:
+            return True
+        return None
+
+    return differ
+
+
+def _sanity_split_segments(source_path: Path, segs: list, w: int, h: int,
+                           min_gap: float, max_cuts: int = 4) -> list:
+    """Probe-collapse backstop: when probe classification systematically fails
+    over a stretch (seen on a second streamer — the content probe kept missing
+    a dark vertical video, so every probe agreed on the SAME wrong label and
+    the whole clip collapsed into one segment), no boundary exists for the
+    refine/polish passes to fix. So every LONG segment (>12s) gets a few
+    spread change-flag comparisons; a CHANGED pair is bisected and the segment
+    is cut there — but ONLY when the two halves also CLASSIFY differently.
+    That guard keeps person-movement false-CHANGEDs in fullscreen stretches
+    from splitting anything (both halves classify 'full' → cut dropped)."""
+    if not segs or not vision.enabled():
+        return segs
+    differ = _make_frame_differ(source_path)
+    prec = max(0.3, float(min_gap))
+    cuts = 0
+    out: list = []
+    work = [dict(s) for s in segs]
+    while work:
+        s = work.pop(0)
+        span = s["t1"] - s["t0"]
+        if span <= 12.0 or cuts >= max_cuts:
+            out.append(s)
+            continue
+        pts = [s["t0"] + 0.5 + (span - 1.0) * k / 4.0 for k in range(5)]
+        cut = None
+        for a, b in zip(pts, pts[1:]):
+            if not differ(a, b):
+                continue
+            lo, hi = a, b
+            guard = 0
+            while hi - lo > prec and guard < 12:
+                mid = round((lo + hi) / 2.0, 2)
+                if differ(lo, mid):
+                    hi = mid
+                else:
+                    lo = mid
+                guard += 1
+            cand = round((lo + hi) / 2.0, 2)
+            if not (s["t0"] + 1.0 < cand < s["t1"] - 1.0):
+                continue
+            # The cut only stands when the halves classify apart by MAJORITY —
+            # a single classification per half let one flake (the content
+            # probe boxing background furniture as 'content' → corroborated
+            # split on a fullscreen frame) cut a clean 43s fullscreen stretch.
+            # Split vs overlay is QA noise, not a real difference — grouped.
+            def _grp(l):
+                return ("panels", l[1]) if l[0] in ("split", "overlay") else (l[0], None)
+
+            def _majority(a0, a1):
+                labs = [_classify_layout(source_path, a0 + (a1 - a0) * f, w, h)
+                        for f in (0.25, 0.5, 0.75)]
+                grps = [_grp(l) for l in labs if l]
+                if not grps:
+                    return None, None
+                best = max(set(grps), key=grps.count)
+                if grps.count(best) < 2:
+                    return None, None
+                rep = next(l for l in labs if l and _grp(l) == best)
+                return best, rep
+            ga, la = _majority(s["t0"], cand)
+            gb, lb = _majority(cand, s["t1"])
+            if ga and gb and ga != gb:
+                cut = (cand, la, lb)
+                break
+        if cut is None:
+            out.append(s)
+            continue
+        cand, la, lb = cut
+        cuts += 1
+        left = dict(s, t1=cand, layout=la[0], side=la[1])
+        right = dict(s, t0=cand, layout=lb[0], side=lb[1])
+        out.append(left)
+        work.insert(0, right)   # the right half may hide more switches
+    return out
 
 
 def _polish_boundaries(source_path: Path, segs: list, w: int, h: int,
@@ -519,28 +650,7 @@ def _refine_with_change_flags(source_path: Path, segs: list, t0: float, t1: floa
        so comparisons false-positive."""
     if not vision.enabled() or not segs:
         return segs
-    cache: dict = {}
-
-    def frame(t: float):
-        t = round(t, 2)
-        if t not in cache:
-            cache[t] = _extract_frame_b64(source_path, t)
-        return cache[t]
-
-    def differ(ta: float, tb: float):
-        a, b = frame(ta), frame(tb)
-        if not a or not b:
-            return None
-        ans = vision.compare(a, b, _CHANGE_PROBE_QUESTION)
-        if not ans:
-            return None
-        up = ans.strip().upper()
-        if up.startswith("SAME"):
-            return False
-        if "CHANGED" in up:
-            return True
-        return None
-
+    differ = _make_frame_differ(source_path)
     prec = max(0.3, float(min_gap))
 
     # 1) boundary verification — merge across boundaries the model calls SAME
