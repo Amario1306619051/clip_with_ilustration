@@ -196,7 +196,7 @@ def api_queue_import(req: QueueImportRequest):
 @app.get("/api/queue")
 def api_queue_list():
     """Sidebar summary of every job (status, kf counts) — polled by the frontend."""
-    return {"jobs": batch_queue.list_jobs()}
+    return {"jobs": batch_queue.list_jobs(), "box_eta": batch_queue.boxing_eta_seconds()}
 
 
 @app.get("/api/queue/{key}")

@@ -1073,11 +1073,19 @@ async function refreshQueue() {
     const r = await fetch('/api/queue');
     if (!r.ok) return;
     const data = await r.json();
-    renderQueueList(data.jobs || []);
+    renderQueueList(data.jobs || [], data.box_eta);
   } catch (e) { /* best-effort */ }
 }
 
-function renderQueueList(jobs) {
+function fmtEta(s) {
+  if (s == null || !isFinite(s) || s <= 0) return '';
+  const m = Math.round(s / 60);
+  if (m < 1) return '<1 min left';
+  if (m < 60) return `~${m} min left`;
+  return `~${(m / 60).toFixed(1)} h left`;
+}
+
+function renderQueueList(jobs, boxEta) {
   const ul = $('#queue-list'); const meta = $('#queue-meta'); const prog = $('#queue-progress');
   if (!ul) return;
   if (!jobs.length) {
@@ -1097,7 +1105,8 @@ function renderQueueList(jobs) {
     if (fill) fill.style.width = pct + '%';
     if (txt) {
       const phase = c.downloading ? 'downloading' : (c.predicting ? 'boxing' : null);
-      txt.textContent = `${settled}/${jobs.length} boxed · ${pct}%` + (phase ? ` · ${phase}…` : '');
+      const eta = (c.predicting || c.downloaded) ? fmtEta(boxEta) : '';
+      txt.textContent = `${settled}/${jobs.length} boxed · ${pct}%` + (phase ? ` · ${phase}…` : '') + (eta ? ` · ${eta}` : '');
     }
   }
   ul.innerHTML = jobs.map((j) => {

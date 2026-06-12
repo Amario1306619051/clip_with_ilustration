@@ -85,6 +85,8 @@ _TERMINAL = {"ready", "done", "error"}
 _lock = threading.RLock()       # serializes all DB access within the process
 _worker_started = False
 _wake = threading.Event()       # set to nudge the worker when new work arrives
+_box_started: dict = {}         # key → time a job entered the boxing stage
+_box_durations: list = []       # recent boxing wall-times (s), for the ETA estimate
 
 # jobs table = these scalar columns (box keyframes live in the keyframes table).
 _JOB_COLS = [
@@ -672,7 +674,33 @@ def _claim_next(from_status: str, to_status: str, message: str):
                      (to_status, message, row["key"]))
         job = _row_to_job(conn, row)
         job["status"] = to_status
+        if to_status == "predicting":
+            _box_started[row["key"]] = time.time()   # ETA stopwatch
         return job
+
+
+def _record_box_time(key: str) -> None:
+    """Log how long a boxing job took, for the rolling ETA average."""
+    t0 = _box_started.pop(key, None)
+    if t0 is not None:
+        _box_durations.append(time.time() - t0)
+        del _box_durations[:-12]   # keep the last 12
+
+
+def boxing_eta_seconds() -> Optional[float]:
+    """Estimated seconds until all queued boxing jobs finish, from the rolling
+    average boxing time and how many clips still wait. None until we have a
+    sample. Jobs already in flight count as half a clip remaining on average."""
+    if not _box_durations:
+        return None
+    avg = sum(_box_durations) / len(_box_durations)
+    with _lock, _db() as conn:
+        waiting = conn.execute(
+            "SELECT COUNT(*) AS c FROM jobs WHERE status='downloaded'").fetchone()["c"]
+        inflight = conn.execute(
+            "SELECT COUNT(*) AS c FROM jobs WHERE status='predicting'").fetchone()["c"]
+    workers = max(1, BOXING_WORKERS)
+    return ((waiting + inflight * 0.5) / workers) * avg
 
 
 def _reset_interrupted() -> None:
@@ -737,6 +765,9 @@ def _stage_loop(name: str, from_status: str, to_status: str,
         except Exception as e:  # noqa: BLE001 — never let a pool thread die
             log.exception("queue %s worker crashed on %s: %s", name, job.get("id"), e)
             _update(job["key"], status="error", message=f"{name} error: {e}")
+        finally:
+            if name == "boxing":
+                _record_box_time(job["key"])   # feed the ETA estimate
         _wake.set()   # hand-off: nudge downstream stages immediately
 
 
