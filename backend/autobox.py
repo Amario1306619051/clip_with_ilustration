@@ -361,7 +361,19 @@ def _classify_layout(source_path: Path, t: float, w: int, h: int):
         if c_huge:
             return ("fullcontent", None)
         return None
-    if p_small and (c_huge or c is None):
+    if p_small:
+        # A small person box clearly SEPARATE from the content box IS a corner/
+        # side cam — no QA needed, and the content needn't be 'huge' (a 3-column
+        # layout's middle video is ~40% of the frame; requiring huge made every
+        # such frame inconclusive, and a couple of spurious 'full' labels then
+        # filled the whole clip). The QA tiebreak is only for the ambiguous
+        # cases: the person box sits INSIDE the content (a face that is part of
+        # a meme/video) or no content was found at all.
+        if c is not None:
+            ix = max(0.0, min(p["x"] + p["w"], c["x"] + c["w"]) - max(p["x"], c["x"]))
+            iy = max(0.0, min(p["y"] + p["h"], c["y"] + c["h"]) - max(p["y"], c["y"]))
+            if (ix * iy) / max(1.0, p["w"] * p["h"]) < 0.3:
+                return ("overlay", p_side)
         ans = (vision.describe(b64, _CAM_PRESENT_QUESTION, max_tokens=5) or "").strip().lower()
         if ans.startswith("no"):
             return ("fullcontent", None)
