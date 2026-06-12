@@ -393,6 +393,20 @@ def skip_boxing(key: str) -> Optional[dict]:
     return _find(key)
 
 
+def stop_boxing() -> int:
+    """Pull EVERY job waiting in the boxing queue (`downloaded`) out to `ready`
+    with no boxes — stops the boxing run so the user can focus elsewhere; each
+    becomes a draw-manually clip. The 1-2 jobs already in-flight finish (a
+    vision call can't be interrupted mid-request) but no new ones start.
+    Returns how many were pulled."""
+    with _lock, _db() as conn:
+        cur = conn.execute(
+            "UPDATE jobs SET status='ready', "
+            "message='boxing stopped — draw the boxes manually' "
+            "WHERE status='downloaded'")
+        return cur.rowcount
+
+
 def queue_render(key: str) -> Optional[dict]:
     """Mark a downloaded job for the (background) render phase. Boxes used are
     whatever is currently saved (the frontend auto-saves edits before calling)."""
@@ -438,11 +452,11 @@ def delete_job(key: str, cleanup: bool = True) -> bool:
 
 # ───────────────────────── background worker ─────────────────────────
 _OBSERVE_QUESTION = (
-    "Look at this video frame from a reaction stream. In ONE short sentence, "
-    "describe the live streamer in the webcam panel (gender, skin tone, clothing, "
-    "accessories). Then in ONE short sentence, describe what kind of content the "
-    "other panel shows. Be factual and concise. Do NOT mention left/right/top/"
-    "bottom positions. Answer with the two sentences only."
+    "Look at this video frame. In ONE short sentence, describe the main person on "
+    "camera (gender, skin tone, clothing, accessories). Then in ONE short "
+    "sentence, describe what the other on-screen content area shows, if any. Be "
+    "factual and concise. Do NOT mention left/right/top/bottom positions. Answer "
+    "with the two sentences only."
 )
 
 
@@ -553,9 +567,6 @@ def _predict_boxes(job: dict) -> None:
                             role="streamer", step=stp, segments=segs)
         if job.get("prompt1") and not box1:
             notes.append("box1: nothing detected")
-        w_, h_ = job.get("width") or 0, job.get("height") or 0
-        if box1 and w_ and h_:
-            box1 = autobox.debounce_track(box1, w=w_, h=h_)  # drop sub-second box flickers
         box2 = None
         if NUM_BOXES >= 2:
             box2 = _predict_box(src, p2m, dur, padding=pad,
@@ -579,6 +590,17 @@ def _predict_boxes(job: dict) -> None:
                     # in a true split the content area is the geometric
                     # complement of the streamer panel (seam → frame edge)
                     box2 = autobox.expand_content_to_seam(box1, box2, w_, h_)
+                    # both boxes full-frame at once = the same shot stacked
+                    # twice → the streamer box owns fullscreen, box2 gaps
+                    box2 = autobox.dedupe_fullframe_pair(box1, box2, w_, h_)
+        # drop sub-second box flickers (a transient zoom/funny-effect frame that
+        # resizes the box then reverts) — applies to whichever boxes exist
+        w_, h_ = job.get("width") or 0, job.get("height") or 0
+        if w_ and h_:
+            if box1:
+                box1 = autobox.debounce_track(box1, w=w_, h=h_)
+            if box2:
+                box2 = autobox.debounce_track(box2, w=w_, h=h_)
     except Exception as e:  # noqa: BLE001 — download already succeeded; boxes are best-effort
         log.warning("queue predict failed (%s): %s", job["id"], e)
         _update(key, status="ready", box1=None, box2=None,

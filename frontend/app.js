@@ -1087,6 +1087,8 @@ function renderQueueList(jobs) {
   const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
   const working = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0);
   if (meta) meta.textContent = `${jobs.length} job(s) · ${c.ready || 0} ready · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
+  const stopBtn = $('#btn-queue-stop-box');
+  if (stopBtn) stopBtn.classList.toggle('hidden', working === 0);
   if (prog) {
     prog.classList.remove('hidden');
     const settled = (c.ready || 0) + (c.error || 0);
@@ -1230,6 +1232,15 @@ async function retryQueueJob(key) {
       setStatus($('#queue-status'), `Added ${res.added}, skipped ${res.skipped} (already queued). Working in the background…`, 'ok');
       refreshQueue();
     } catch (e) { setStatus($('#queue-status'), 'Import failed: ' + e.message, 'err'); }
+  });
+  const stopBtn = $('#btn-queue-stop-box');
+  if (stopBtn) stopBtn.addEventListener('click', async () => {
+    if (!confirm('Stop the AI boxing run? Clips still waiting become draw-manually.')) return;
+    try {
+      const r = await api('queue/stop-boxing', {});
+      setStatus($('#queue-status'), `Boxing stopped — ${r.stopped} clip(s) set to draw-manually.`, 'ok');
+      refreshQueue();
+    } catch (e) { setStatus($('#queue-status'), 'Stop failed: ' + e.message, 'err'); }
   });
   refreshQueue();
   setInterval(refreshQueue, 3000);

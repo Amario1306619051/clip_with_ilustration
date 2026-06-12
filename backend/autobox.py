@@ -264,8 +264,9 @@ def _smooth(dets: list, med_win: int = 5, avg_win: int = 3) -> list:
     return out
 
 
-_SIDE_PROBE_PROMPT = ("the streamer's webcam panel — the live person talking directly "
-                      "to the camera (not people inside the video content being reacted to)")
+_SIDE_PROBE_PROMPT = ("the main on-camera person — the host or speaker talking directly "
+                      "to the camera (NOT people who appear inside another video, image, "
+                      "or post shown on screen)")
 
 
 def _resolve_side(source_path: Path, times: list, w: int, h: int) -> str:
@@ -297,32 +298,30 @@ def _resolve_side(source_path: Path, times: list, w: int, h: int) -> str:
 # model needs a CONCRETE structural description; vague wording measurably
 # degrades boxing). Chosen per layout segment by _detect_layout_segments.
 _LAYOUT_PHRASES = {
-    "split": "The screen is split into two side-by-side panels: the webcam panel and the content panel, each spanning the full height.",
-    "overlay": "The content fills most of the screen, and the streamer's webcam is a smaller overlay window drawn on top of it.",
-    "full": "The streamer's webcam fills the entire screen here; there is NO separate content panel in this part of the video.",
-    "fullcontent": "The content fills the entire screen here; the streamer's webcam is NOT visible in this part of the video.",
+    "split": "The screen is split into two side-by-side panels: the person's camera panel and a separate content panel, each spanning the full height.",
+    "overlay": "A content area fills most of the screen, and the person's camera is a smaller overlay window drawn on top of it.",
+    "full": "The person's camera fills the entire screen here; there is NO separate content panel in this part of the video.",
+    "fullcontent": "A content area fills the entire screen here; the person's camera is NOT visible in this part of the video.",
 }
 
-_CONTENT_PROBE_PROMPT = ("the content being shown or reacted to — an embedded video, "
-                         "image, meme, text post, comment, thread or screenshot. "
-                         "People shown INSIDE the content (in an Instagram/YouTube "
-                         "comment, a chat message, a screenshot, or the video being "
-                         "reacted to) are PART of the content — include them "
-                         "(not the live streamer's webcam)")
+_CONTENT_PROBE_PROMPT = ("a separate on-screen content area distinct from the main "
+                         "on-camera person — another video, image, screenshot, slide, "
+                         "graphic, game feed, social-media post, comment, or text. "
+                         "People shown INSIDE that content (e.g. in a comment, a "
+                         "screenshot, or the video shown) are PART of the content — "
+                         "include them (NOT the host/presenter's own camera)")
 
 _CONTENT_PRESENT_QUESTION = (
-    "Besides the streamer's own camera and room, is there a SEPARATE piece of "
-    "REACTED CONTENT on screen right now — an embedded video, image, meme, "
-    "social-media post, comment, screenshot, or text — shown in its own panel "
-    "distinct from the streamer? A dark wall, shelves, or studio background is "
-    "NOT content. Answer with one word: yes or no.")
+    "Besides the main on-camera person and their room/background, is there a "
+    "SEPARATE content area on screen right now — another video, image, slide, "
+    "graphic, game feed, social-media post, comment, screenshot, or text — in "
+    "its own panel distinct from that person? A plain wall, shelves, or studio "
+    "background is NOT content. Answer with one word: yes or no.")
 
-_CAM_PRESENT_QUESTION = ("Is the live streamer's own webcam view visible in this frame "
-                         "(the person reacting — not people inside the content being "
-                         "shown)? A face that is PART of a meme, an edited image, or "
-                         "the video being reacted to does NOT count as a webcam view — "
-                         "even if it looks like the streamer's own face pasted into the "
-                         "content. Answer with one word: yes or no.")
+_CAM_PRESENT_QUESTION = ("Is the main on-camera person (the host or speaker talking to "
+                         "the camera) visible in this frame? A face that is PART of "
+                         "another video, image, or post being shown does NOT count. "
+                         "Answer with one word: yes or no.")
 
 
 def _geom(det, w, h):
@@ -445,9 +444,9 @@ def _classify_layout(source_path: Path, t: float, w: int, h: int):
 # segments → flickering boxes), and they directly flag WHEN the streamer/content
 # panel moves or resizes — even within the same layout class.
 _CHANGE_PROBE_QUESTION = (
-    "These are two frames from the same stream video: frame A first, frame B "
-    "second. Did the SCREEN LAYOUT change between them — a webcam panel or "
-    "content panel appearing, disappearing, MOVING, or changing SIZE? Ignore "
+    "These are two frames from the same video: frame A first, frame B "
+    "second. Did the SCREEN LAYOUT change between them — a person's camera panel "
+    "or a content panel appearing, disappearing, MOVING, or changing SIZE? Ignore "
     "what plays INSIDE a panel (the video content itself changing does not "
     "count); only the panel geometry matters. "
     "Answer exactly 'SAME' or 'CHANGED: <one short phrase>'."

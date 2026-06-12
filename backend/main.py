@@ -236,6 +236,13 @@ def api_queue_skip_box(key: str):
     return {"ok": True}
 
 
+@app.post("/api/queue/stop-boxing")
+def api_queue_stop_boxing():
+    """Stop the whole boxing run: every job still waiting to be boxed goes to
+    ready (draw-manually). In-flight jobs finish; no new ones start."""
+    return {"stopped": batch_queue.stop_boxing()}
+
+
 @app.delete("/api/queue/{key}")
 def api_queue_delete(key: str):
     batch_queue.delete_job(key)
