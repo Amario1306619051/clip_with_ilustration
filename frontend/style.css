@@ -1032,3 +1032,6 @@ kbd {
 .muted { color: var(--text-mute); font-size: 12px; }
 
 @media (max-width: 900px) { .sfx-layout { grid-template-columns: 1fr; } }
+
+/* skip-AI-boxing button on boxing-queued jobs (clipper-parity) */
+.q-skip { font-size: 10px; padding: 2px 7px; white-space: nowrap; flex: 0 0 auto; }

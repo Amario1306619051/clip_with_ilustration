@@ -225,6 +225,17 @@ def api_queue_retry(key: str):
     return {"ok": True}
 
 
+@app.post("/api/queue/{key}/skip-box")
+def api_queue_skip_box(key: str):
+    """Pull a job out of the AI-boxing queue → ready immediately, no boxes —
+    the user draws them manually instead of waiting for the boxing stage."""
+    j = batch_queue.skip_boxing(key)
+    if not j:
+        raise HTTPException(status_code=404,
+                            detail="job is not waiting for boxing (only 'downloaded' jobs can skip)")
+    return {"ok": True}
+
+
 @app.delete("/api/queue/{key}")
 def api_queue_delete(key: str):
     batch_queue.delete_job(key)

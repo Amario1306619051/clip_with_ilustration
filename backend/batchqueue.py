@@ -66,11 +66,14 @@ CAPTION_FONT = "Anton"   # batch render caption defaults (match the UI default)
 CAPTION_SIZE = 64
 
 # Stage concurrency (per the device). Download is I/O-bound → parallelize;
-# boxing hammers the vision endpoint → keep ONE; render is heavy (Whisper + NVENC)
-# but the owner wants two at a time. Each stage is its own pool of worker threads
-# that atomically CLAIM jobs from its input status, so no two grab the same clip.
+# render is heavy (Whisper + NVENC) but the owner wants two at a time. Boxing
+# at 2: each job's detection pool is 4 concurrent vision calls (the endpoint's
+# clean zone), but most of a boxing job is SEQUENTIAL probing — two jobs
+# interleave their calls well below the 2×4 worst case in practice. Each stage
+# is its own pool of worker threads that atomically CLAIM jobs from its input
+# status, so no two grab the same clip.
 DOWNLOAD_WORKERS = 2
-BOXING_WORKERS = 1
+BOXING_WORKERS = 2
 RENDER_WORKERS = 2
 
 # Statuses (download and boxing are now SEPARATE stages so they parallelize):
@@ -373,6 +376,23 @@ def retry_job(key: str) -> Optional[dict]:
     return j
 
 
+def skip_boxing(key: str) -> Optional[dict]:
+    """Pull a job OUT of the boxing queue: a `downloaded` job (waiting for the
+    AI boxing stage) goes straight to `ready` with no boxes, so the user can
+    open it immediately and draw the boxes manually instead of waiting. Done
+    under the module lock, so the boxing pool can't claim it concurrently
+    (its claim also runs under the lock). Returns the job, or None when the
+    job isn't currently waiting to be boxed."""
+    with _lock, _db() as conn:
+        row = conn.execute("SELECT status FROM jobs WHERE key=?", (key,)).fetchone()
+        if not row or row["status"] != "downloaded":
+            return None
+        conn.execute(
+            "UPDATE jobs SET status='ready', "
+            "message='boxing skipped — draw the boxes manually' WHERE key=?", (key,))
+    return _find(key)
+
+
 def queue_render(key: str) -> Optional[dict]:
     """Mark a downloaded job for the (background) render phase. Boxes used are
     whatever is currently saved (the frontend auto-saves edits before calling)."""
@@ -552,6 +572,10 @@ def _predict_boxes(job: dict) -> None:
                     # (streamer box too wide / content box too far in) → snap
                     # both edges to a shared divider so the crops don't double up
                     box1, box2 = autobox.resolve_split_overlap(box1, box2, w_, h_)
+                    # …and an UNDER-sized content box can't be fixed by a snap:
+                    # in a true split the content area is the geometric
+                    # complement of the streamer panel (seam → frame edge)
+                    box2 = autobox.expand_content_to_seam(box1, box2, w_, h_)
     except Exception as e:  # noqa: BLE001 — download already succeeded; boxes are best-effort
         log.warning("queue predict failed (%s): %s", job["id"], e)
         _update(key, status="ready", box1=None, box2=None,
@@ -693,8 +717,7 @@ def _stage_loop(name: str, from_status: str, to_status: str,
 
 def start_worker() -> None:
     """Idempotent — call once at app startup. Spawns the per-stage pools:
-    DOWNLOAD_WORKERS yt-dlp threads, BOXING_WORKERS vision threads (1 — don't
-    hammer the endpoint), RENDER_WORKERS transcribe+render threads."""
+    DOWNLOAD_WORKERS yt-dlp threads, BOXING_WORKERS vision threads, RENDER_WORKERS transcribe+render threads."""
     global _worker_started
     with _lock:
         if _worker_started:

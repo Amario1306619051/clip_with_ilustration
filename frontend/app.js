@@ -1089,19 +1089,36 @@ function renderQueueList(jobs) {
     const canOpen = j.status === 'ready';
     const kf = canOpen ? ` · ${j.kf1} kf` : '';
     const retry = j.status === 'error' ? `<button class="q-retry" data-key="${j.key}" title="retry this job">↻</button>` : '';
+    // A job waiting in the boxing queue can be pulled out: ready NOW, no box,
+    // the user draws it manually instead of waiting for the AI stage.
+    const skip = j.status === 'downloaded'
+      ? `<button class="q-skip" data-key="${j.key}" title="Skip AI boxing — open this clip now and draw the crop manually">✎ manual</button>`
+      : '';
     return `<li class="queue-item${active}" data-status="${j.status}">
       <button class="queue-open" data-key="${j.key}" ${canOpen ? '' : 'disabled'} title="${thumbEscape(j.message || '')}">
         <span class="q-id">${thumbEscape(j.id)}</span>
         <span class="q-title">${thumbEscape(j.title || '')}</span>
         <span class="q-sub">${qStatusBadge(j.status)}${kf}</span>
       </button>
-      ${retry}
+      ${skip}${retry}
       <button class="q-del" data-key="${j.key}" title="delete job + its downloaded clip">×</button>
     </li>`;
   }).join('');
   ul.querySelectorAll('.queue-open').forEach((b) => b.addEventListener('click', () => openQueueJob(b.dataset.key)));
   ul.querySelectorAll('.q-del').forEach((b) => b.addEventListener('click', () => deleteQueueJob(b.dataset.key)));
   ul.querySelectorAll('.q-retry').forEach((b) => b.addEventListener('click', () => retryQueueJob(b.dataset.key)));
+  ul.querySelectorAll('.q-skip').forEach((b) => b.addEventListener('click', () => skipBoxQueueJob(b.dataset.key)));
+}
+
+async function skipBoxQueueJob(key) {
+  try {
+    await api(`queue/${key}/skip-box`, {});
+    await openQueueJob(key);   // ready now — open it straight into the editor
+    setStatus($('#queue-status'), 'Boxing skipped — draw the crop manually.', 'ok');
+  } catch (e) {
+    setStatus($('#queue-status'), 'Skip failed: ' + e.message, 'err');
+    refreshQueue();
+  }
 }
 
 async function openQueueJob(key) {
