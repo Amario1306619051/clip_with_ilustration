@@ -1049,6 +1049,39 @@ def expand_content_to_seam(kfs1: list, kfs2: list, w: int, h: int) -> list:
     return out
 
 
+def dedupe_fullframe_pair(kfs1: list, kfs2: list, w: int, h: int) -> list:
+    """BOTH boxes real and BOTH ~full-frame over the same stretch = the same
+    shot stacked twice in the reel (seen on a fullscreen tail: a stray
+    'content panel' detection boxed the whole screen right before the full
+    segment started). The streamer box owns a fullscreen shot by role
+    convention, so box2's kf flips to gap there. Pure geometry, no model
+    calls. Returns the new kfs2."""
+    if not kfs1 or not kfs2:
+        return kfs2
+    inf = float("inf")
+
+    def reign(kfs, i):
+        return kfs[i]["t"], (kfs[i + 1]["t"] if i + 1 < len(kfs) else inf)
+
+    def isfull(k):
+        return (not k.get("gap")) and k["w"] >= 0.92 * w and k["h"] >= 0.92 * h
+
+    out = []
+    for j, k in enumerate(kfs2):
+        k = dict(k)
+        if isfull(k):
+            a2, b2 = reign(kfs2, j)
+            for i, b1 in enumerate(kfs1):
+                if not isfull(b1):
+                    continue
+                a1, b1e = reign(kfs1, i)
+                if min(b2, b1e) - max(a2, a1) > 0.2:
+                    k["gap"] = True
+                    break
+        out.append(k)
+    return out
+
+
 def predict_track(
     source_path: Path,
     prompt: str,
