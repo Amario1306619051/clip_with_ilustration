@@ -284,7 +284,10 @@ _LAYOUT_PHRASES = {
 }
 
 _CONTENT_PROBE_PROMPT = ("the content being shown or reacted to — an embedded video, "
-                         "image, meme, text post, comment, thread or screenshot "
+                         "image, meme, text post, comment, thread or screenshot. "
+                         "People shown INSIDE the content (in an Instagram/YouTube "
+                         "comment, a chat message, a screenshot, or the video being "
+                         "reacted to) are PART of the content — include them "
                          "(not the live streamer's webcam)")
 
 _CAM_PRESENT_QUESTION = ("Is the live streamer's own webcam view visible in this frame "
