@@ -1035,3 +1035,10 @@ kbd {
 
 /* skip-AI-boxing button on boxing-queued jobs (clipper-parity) */
 .q-skip { font-size: 10px; padding: 2px 7px; white-space: nowrap; flex: 0 0 auto; }
+
+/* queue progress bar (clipper-parity) */
+.queue-progress { margin: 8px 0 4px; }
+.queue-progress.hidden { display: none; }
+.queue-progress-bar { height: 6px; background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 99px; overflow: hidden; }
+.queue-progress-bar span { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .4s ease; }
+.queue-progress-txt { font-size: 10px; color: var(--text-dim); margin-top: 3px; font-variant-numeric: tabular-nums; }

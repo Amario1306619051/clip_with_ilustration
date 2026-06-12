@@ -1078,12 +1078,26 @@ async function refreshQueue() {
 }
 
 function renderQueueList(jobs) {
-  const ul = $('#queue-list'); const meta = $('#queue-meta');
+  const ul = $('#queue-list'); const meta = $('#queue-meta'); const prog = $('#queue-progress');
   if (!ul) return;
-  if (!jobs.length) { ul.innerHTML = ''; if (meta) meta.textContent = 'No jobs queued.'; return; }
+  if (!jobs.length) {
+    ul.innerHTML = ''; if (meta) meta.textContent = 'No jobs queued.';
+    if (prog) prog.classList.add('hidden'); return;
+  }
   const c = jobs.reduce((a, j) => { a[j.status] = (a[j.status] || 0) + 1; return a; }, {});
   const working = (c.pending || 0) + (c.downloading || 0) + (c.downloaded || 0) + (c.predicting || 0);
   if (meta) meta.textContent = `${jobs.length} job(s) · ${c.ready || 0} ready · ${working} working${c.error ? ` · ${c.error} error` : ''}`;
+  if (prog) {
+    prog.classList.remove('hidden');
+    const settled = (c.ready || 0) + (c.error || 0);
+    const pct = Math.round((settled / jobs.length) * 100);
+    const fill = $('#queue-progress-fill'); const txt = $('#queue-progress-txt');
+    if (fill) fill.style.width = pct + '%';
+    if (txt) {
+      const phase = c.downloading ? 'downloading' : (c.predicting ? 'boxing' : null);
+      txt.textContent = `${settled}/${jobs.length} boxed · ${pct}%` + (phase ? ` · ${phase}…` : '');
+    }
+  }
   ul.innerHTML = jobs.map((j) => {
     const active = j.key === state.activeQueueKey ? ' active' : '';
     const canOpen = j.status === 'ready';
