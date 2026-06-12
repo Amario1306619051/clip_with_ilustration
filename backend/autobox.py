@@ -824,7 +824,56 @@ def detect_layout_segments(source_path: Path, t0: float, t1: float, w: int, h: i
     share it (independent per-box probing can disagree — e.g. box1 calling a
     stretch fullscreen-webcam while box2 calls it fullscreen-content → both
     boxes real at once and the reel shows the same frame twice)."""
-    return _detect_layout_segments(source_path, t0, t1, w, h, min_gap=min_gap)
+    segs = _detect_layout_segments(source_path, t0, t1, w, h, min_gap=min_gap)
+    # Boundary LEAD: a switch detected at the first frame that already shows the
+    # new layout lands a touch LATE (the box holds the old framing into the new
+    # shot — the perceptible "delay"). Nudge each interior boundary ~0.3s
+    # EARLIER so the box switches just before the cut, clamped so no segment
+    # collapses. A hair-early switch reads far better than a late one.
+    if segs and len(segs) > 1:
+        LEAD = 0.3
+        for i in range(1, len(segs)):
+            lo = segs[i - 1]["t0"] + 0.4           # keep the previous segment >= 0.4s
+            new_t0 = max(lo, segs[i]["t0"] - LEAD)
+            segs[i - 1]["t1"] = new_t0
+            segs[i]["t0"] = new_t0
+    return segs
+
+
+def debounce_track(kfs: list, min_hold: float = 0.6, w: int = 0, h: int = 0) -> list:
+    """Remove sub-second box EXCURSIONS: a brief change that reverts. The model
+    momentarily resizes/moves the streamer box on a transient editing effect
+    (a zoom punch, a funny overlay, a flash) — a keyframe that reigns < min_hold
+    and whose box differs from BOTH the keyframe before and after it (which are
+    themselves similar) is that flicker. Drop it; the previous box just holds
+    through. Gap keyframes and genuine sustained changes are kept."""
+    if not kfs or len(kfs) < 3 or not (w and h):
+        return kfs
+    diag = (w * w + h * h) ** 0.5
+
+    def far(a, b):
+        if a.get("gap") or b.get("gap"):
+            return a.get("gap") != b.get("gap")
+        ca = (a["x"] + a["w"] / 2.0, a["y"] + a["h"] / 2.0)
+        cb = (b["x"] + b["w"] / 2.0, b["y"] + b["h"] / 2.0)
+        moved = ((ca[0] - cb[0]) ** 2 + (ca[1] - cb[1]) ** 2) ** 0.5 / diag > 0.04
+        resized = abs(a["w"] - b["w"]) / max(1.0, w) > 0.05 or \
+                  abs(a["h"] - b["h"]) / max(1.0, h) > 0.05
+        return moved or resized
+
+    out = list(kfs)
+    changed = True
+    while changed and len(out) >= 3:
+        changed = False
+        for i in range(1, len(out) - 1):
+            prev, cur, nxt = out[i - 1], out[i], out[i + 1]
+            hold = nxt["t"] - cur["t"]
+            # cur is a short blip that differs from prev, and prev≈next → revert
+            if hold < min_hold and far(prev, cur) and not far(prev, nxt):
+                out.pop(i)
+                changed = True
+                break
+    return out
 
 
 def _fill_placeholders(prompt: str, layout, side) -> str:

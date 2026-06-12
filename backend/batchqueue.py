@@ -553,6 +553,9 @@ def _predict_boxes(job: dict) -> None:
                             role="streamer", step=stp, segments=segs)
         if job.get("prompt1") and not box1:
             notes.append("box1: nothing detected")
+        w_, h_ = job.get("width") or 0, job.get("height") or 0
+        if box1 and w_ and h_:
+            box1 = autobox.debounce_track(box1, w=w_, h=h_)  # drop sub-second box flickers
         box2 = None
         if NUM_BOXES >= 2:
             box2 = _predict_box(src, p2m, dur, padding=pad,
