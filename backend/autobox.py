@@ -231,16 +231,36 @@ def _dedupe_keyframes(kfs: list, eps: float = 0.5) -> list:
     return out
 
 
-def _smooth(dets: list, win: int = 3) -> list:
-    """Centered moving-average over the detected sequence to damp frame-to-frame
-    jitter (the model boxes wobble a few px). Keeps each kf's time."""
+def _smooth(dets: list, med_win: int = 5, avg_win: int = 3) -> list:
+    """Temporal smoothing so each box reflects a WINDOW of recent frames, not a
+    single (possibly flaky) detection — the model decides each frame
+    independently, so one bad frame jumps the box for a fraction of a second.
+    TWO passes per coordinate, centered:
+      1. MEDIAN over `med_win` (±2) — fully rejects a single-frame spike
+         (median of [normal, spike, normal] = normal); this is the 'remember
+         the last few frames before deciding' part.
+      2. light MOVING-AVERAGE over `avg_win` — irons the few-px residual wobble.
+    Keeps each kf's time."""
     keys = ("x", "y", "w", "h")
-    half = win // 2
-    out = []
+
+    def window(seq, i, win):
+        half = win // 2
+        return seq[max(0, i - half):min(len(seq), i + half + 1)]
+
+    med = []
     for i in range(len(dets)):
-        lo, hi = max(0, i - half), min(len(dets), i + half + 1)
-        avg = {k: sum(dets[j][1][k] for j in range(lo, hi)) / (hi - lo) for k in keys}
-        out.append((dets[i][0], avg))
+        win = window(dets, i, med_win)
+        m = {}
+        for k in keys:
+            vals = sorted(b[k] for _, b in win)
+            n = len(vals)
+            m[k] = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2.0
+        med.append((dets[i][0], m))
+    out = []
+    for i in range(len(med)):
+        win = window(med, i, avg_win)
+        avg = {k: sum(b[k] for _, b in win) / len(win) for k in keys}
+        out.append((med[i][0], avg))
     return out
 
 
