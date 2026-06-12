@@ -310,6 +310,13 @@ _CONTENT_PROBE_PROMPT = ("the content being shown or reacted to — an embedded 
                          "reacted to) are PART of the content — include them "
                          "(not the live streamer's webcam)")
 
+_CONTENT_PRESENT_QUESTION = (
+    "Besides the streamer's own camera and room, is there a SEPARATE piece of "
+    "REACTED CONTENT on screen right now — an embedded video, image, meme, "
+    "social-media post, comment, screenshot, or text — shown in its own panel "
+    "distinct from the streamer? A dark wall, shelves, or studio background is "
+    "NOT content. Answer with one word: yes or no.")
+
 _CAM_PRESENT_QUESTION = ("Is the live streamer's own webcam view visible in this frame "
                          "(the person reacting — not people inside the content being "
                          "shown)? A face that is PART of a meme, an edited image, or "
@@ -371,6 +378,16 @@ def _classify_layout(source_path: Path, t: float, w: int, h: int):
             else:
                 clear = (c["x"] + c["w"]) <= p["x"] + 0.08 * w
             if clear:
+                # Geometric corroboration is NOT enough: a fullscreen studio
+                # shot with the streamer to one side has dark background on the
+                # other, which the content probe flakily boxes as a "panel" —
+                # geometrically identical to a real split with a dark video.
+                # Confirm with a direct yes/no that REACTED content is actually
+                # present (a wall/shelf is not content).
+                ans = (vision.describe(b64, _CONTENT_PRESENT_QUESTION, max_tokens=5)
+                       or "").strip().lower()
+                if ans.startswith("no"):
+                    return ("full", None)
                 return ("split", p_side)
         # No corroborating content beside an edge-anchored panel is AMBIGUOUS,
         # not proof of fullscreen: the content probe also just misses (e.g. a
