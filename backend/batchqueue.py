@@ -670,6 +670,10 @@ def _predict_boxes(job: dict) -> None:
                     # both boxes full-frame at once = the same shot stacked
                     # twice → the streamer box owns fullscreen, box2 gaps
                     box2 = autobox.dedupe_fullframe_pair(box1, box2, w_, h_)
+                    # box1 & box2 detected independently → on a solo shot box2
+                    # grabs the SAME person as box1 (the reel shows them twice);
+                    # where they overlap heavily, gap box2 (→ single-box full focus)
+                    box2 = autobox.dedupe_same_person(box1, box2)
         # drop sub-second box flickers (a transient zoom/funny-effect frame that
         # resizes the box then reverts) — applies to whichever boxes exist
         w_, h_ = job.get("width") or 0, job.get("height") or 0

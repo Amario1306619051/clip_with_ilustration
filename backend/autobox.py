@@ -1252,6 +1252,37 @@ def dedupe_fullframe_pair(kfs1: list, kfs2: list, w: int, h: int) -> list:
     return out
 
 
+def dedupe_same_person(kfs1: list, kfs2: list, overlap_thresh: float = 0.6) -> list:
+    """box1 and box2 are detected by INDEPENDENT model calls (no cross-box
+    awareness), so on a solo shot the layout probe called a split — or any time
+    only one subject is really on screen — box2 lands on the SAME subject as box1,
+    and the reel shows that person cropped twice. Wherever box1 and box2 overlap
+    so much that one is essentially inside the other (intersection / smaller-area
+    > overlap_thresh), they are the same subject → drop box2 there (→ gap → the
+    renderer's single-box full-focus shows just box1). Pure geometry, no model
+    call. Run AFTER resolve_split_overlap (which snaps TRUE side-by-side splits to
+    a seam, so two genuinely different people no longer overlap). Returns kfs2."""
+    if not kfs1 or not kfs2:
+        return kfs2
+
+    def overlap_ratio(a, b):
+        ix = max(0.0, min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"]))
+        iy = max(0.0, min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"]))
+        inter = ix * iy
+        m = min(a["w"] * a["h"], b["w"] * b["h"])
+        return inter / m if m > 0 else 0.0
+
+    out = []
+    for k in kfs2:
+        k = dict(k)
+        if not k.get("gap"):
+            o = _active_kf(kfs1, k["t"])
+            if o and not o.get("gap") and overlap_ratio(o, k) > overlap_thresh:
+                k["gap"] = True   # same subject as box1 → box2 empty here
+        out.append(k)
+    return out
+
+
 # ── Windowed shot-director pre-pass (Phase 2) ──────────────────────────────
 _DIR_WIN = 2.5         # director window width (s)
 _DIR_STEP = 1.0        # director window hop (s)
