@@ -110,6 +110,18 @@ VLLM_API_KEY=<vLLM key from email_categorizer>
 PEXELS_API_KEY=<Pexels key from step 2>
 ```
 
+### Optional: speaker diarization (for the auto-box **Diarize** toggle)
+
+Skip this unless you want the "who is speaking" hint. Install the extra deps, then add a token:
+
+```bash
+pip install 'pyannote.audio>=4' torchcodec     # torchaudio must match your torch build
+```
+1. Accept the gated models (free) at <https://huggingface.co/pyannote/speaker-diarization-3.1> **and**
+   <https://huggingface.co/pyannote/segmentation-3.0>
+2. Create a **read** token at <https://huggingface.co/settings/tokens>
+3. Add `HF_TOKEN=hf_xxx` to `.env` (leave empty = diarization off; the Director still decides visually).
+
 ## 5. Run the server
 
 ```bash
@@ -129,6 +141,10 @@ Open **http://127.0.0.1:8000** in your browser.
 2. **Crop** — click the **"Crop box"** pill (or press `1`) to activate the canvas → drag on the video
    to create a box (top slot). Want to pan? Scrub to another time and drag again = a new keyframe.
    Each segment row can be toggled **HOLD↔PAN** and **COVER↔BLUR**. Click **Transcribe & Continue**.
+   *Or let the AI box it:* type what the crop should follow, drag a time range, hit **Generate**. Two
+   toggles: **Director** (slides a window over the clip + reads the transcript → better layout/subject
+   choices; a moving subject becomes a smooth **TRACKED** pan instead of going black) and **Diarize**
+   (a who-is-speaking hint — needs the optional setup below). Needs `VISION_*` set in `.env`.
 3. **Illustration** — set the **duration per illustration** (seconds), click **Generate illustration**.
    A row of image candidates appears for each segment → click to pick one (candidate #1 is auto-selected).
    Keywords not quite right? Edit them in the query box → **search again**. Click **Continue**.
