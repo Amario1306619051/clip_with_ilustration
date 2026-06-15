@@ -15,3 +15,12 @@ python-multipart>=0.0.9
 secretstorage>=3.3     # Linux only — needed to read Chrome cookie store
 openai>=1.0            # vLLM client (OpenAI-compatible endpoint) for topic→query
 requests>=2.31         # Pexels search + downloading picked images
+# Optional speaker diarization for the windowed shot-director (Phase 3). pyannote 4.x
+# works with torch 2.11 (needs torch>=2.8); torchcodec supplies audio I/O since the
+# 2.11 torchaudio build dropped load/info. torchaudio MUST match the live torch.
+# Needs a HuggingFace token + gated-model acceptance (see diarize.py / .env.example).
+# Lazy + optional: omit on hosts without a token and diarization stays off.
+pyannote.audio>=4,<5  # diarization (WHO is talking) — optional
+torchcodec            # audio backend pyannote/torchaudio 2.11 need
+torchaudio==2.11.0+cu128  # MUST match torch above (cu128)
+click>=8.0,<8.2       # keep gTTS happy (pyannote/typer would otherwise pull click 8.4+)

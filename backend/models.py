@@ -8,6 +8,11 @@ class Keyframe(BaseModel):
       - interp: 'hold' (default) | 'linear'
       - fit:    'cover' (default) | 'blur_pad'   ← the "blur or not" choice
       - gap:    True marks the segment as empty (black slot)
+      - dynamic: True (implies gap) → auto-box judged it too unstable; left empty
+        on purpose and flagged in the UI for manual drawing (auto-box no longer
+        emits these — a moving subject now pans — but the field stays for back-compat)
+      - moving: True (implies gap=False) → a panning track for a moving subject
+        (size locked, center pans, interp='linear'); drives a 'TRACKED' chip
     """
     t: float = 0.0
     x: float
@@ -17,6 +22,8 @@ class Keyframe(BaseModel):
     interp: str = "hold"
     fit: str = "cover"
     gap: bool = False
+    dynamic: bool = False
+    moving: bool = False
 
 
 class Word(BaseModel):
@@ -178,6 +185,8 @@ class AutoBoxRequest(BaseModel):
     padding: float = 0.05
     smooth: bool = True
     lock_size: bool = True   # lock one box size across the range (pan only) — stable framing
+    director: bool = False      # windowed shot-director pre-pass (frames+transcript → richer segments+pan)
+    diarization: bool = False   # add the dominant-speaker hint (needs pyannote + HF token)
 
 
 class AutoBoxResponse(BaseModel):
@@ -185,6 +194,7 @@ class AutoBoxResponse(BaseModel):
     sampled: int = 0
     detected: int = 0
     message: str = ""
+    director_note: str = ""     # the director's segment timeline (when director=True)
 
 
 class ThumbnailTextRequest(BaseModel):
@@ -203,8 +213,14 @@ class ThumbnailTextResponse(BaseModel):
 
 class QueueImportRequest(BaseModel):
     """Raw text of the uploaded JSON file. Parsed server-side (tolerant of the
-    Python-dict single-quote style the user pastes)."""
+    Python-dict single-quote style the user pastes). `room_id` = the room the new
+    jobs join (None = unassigned)."""
     content: str
+    room_id: Optional[int] = None
+
+
+class RoomCreate(BaseModel):
+    name: str
 
 
 class QueueJobPatch(BaseModel):

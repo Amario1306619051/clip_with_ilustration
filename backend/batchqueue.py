@@ -54,8 +54,8 @@ QUEUE_DIR = BASE_DIR / "queue"
 QUEUE_DIR.mkdir(exist_ok=True)
 DB_FILE = QUEUE_DIR / "queue.db"
 
-# illustrator = 1 (single top crop box); clipper sets this to 2 in its own copy.
-# bbox_2 in the JSON is parsed but unused here.
+# How many crop-box prompts a job carries. clipper = 2 (top + bottom),
+# illustrator overrides this to 1 in its own copy.
 NUM_BOXES = 1
 
 # Whether the worker also runs the heavy transcribe + render phase (on demand,
@@ -91,8 +91,8 @@ _box_durations: list = []       # recent boxing wall-times (s), for the ETA esti
 # jobs table = these scalar columns (box keyframes live in the keyframes table).
 _JOB_COLS = [
     "key", "id", "url", "start", "end", "title", "description",
-    "prompt1", "prompt2", "context", "auto_context", "segment_seconds", "padding",
-    "step_seconds",
+    "prompt1", "prompt2", "context", "segment_seconds", "padding",
+    "step_seconds", "room_id", "director", "diarization", "transcript",
     "status", "message", "job_id", "video_path",
     "width", "height", "duration", "output_path", "filename",
 ]
@@ -121,12 +121,20 @@ def _db():
 
 def _init_db() -> None:
     with _lock, _db() as conn:
+        # Rooms = streamer/project groups. Deleting a room deletes all its jobs +
+        # their downloaded videos (handled explicitly in delete_room, not by FK).
+        conn.execute('''CREATE TABLE IF NOT EXISTS rooms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT UNIQUE NOT NULL,
+            created REAL
+        )''')
         conn.execute('''CREATE TABLE IF NOT EXISTS jobs (
             seq INTEGER PRIMARY KEY AUTOINCREMENT,
             key TEXT UNIQUE NOT NULL,
             id TEXT, url TEXT, start TEXT, "end" TEXT, title TEXT, description TEXT,
-            prompt1 TEXT, prompt2 TEXT, context TEXT, auto_context TEXT,
-            segment_seconds REAL, padding REAL, step_seconds REAL,
+            prompt1 TEXT, prompt2 TEXT, context TEXT,
+            segment_seconds REAL, padding REAL, step_seconds REAL, room_id INTEGER,
+            director INTEGER, diarization INTEGER, transcript TEXT,
             status TEXT, message TEXT, job_id TEXT, video_path TEXT,
             width INTEGER, height INTEGER, duration REAL,
             output_path TEXT, filename TEXT
@@ -134,18 +142,23 @@ def _init_db() -> None:
         # Migrations for DBs created before these columns existed.
         for ddl in ("ALTER TABLE jobs ADD COLUMN padding REAL",
                     "ALTER TABLE jobs ADD COLUMN context TEXT",
-                    "ALTER TABLE jobs ADD COLUMN auto_context TEXT",
-                    "ALTER TABLE jobs ADD COLUMN step_seconds REAL"):
+                    "ALTER TABLE jobs ADD COLUMN step_seconds REAL",
+                    "ALTER TABLE jobs ADD COLUMN room_id INTEGER",
+                    "ALTER TABLE jobs ADD COLUMN director INTEGER",
+                    "ALTER TABLE jobs ADD COLUMN diarization INTEGER",
+                    "ALTER TABLE jobs ADD COLUMN transcript TEXT",
+                    "ALTER TABLE keyframes ADD COLUMN dynamic INTEGER",
+                    "ALTER TABLE keyframes ADD COLUMN moving INTEGER"):
             try:
                 conn.execute(ddl)
             except sqlite3.OperationalError:
-                pass  # column already there
+                pass  # column already there (or its table not created yet)
         conn.execute('''CREATE TABLE IF NOT EXISTS keyframes (
             job_key TEXT NOT NULL,
             box INTEGER NOT NULL,
             idx INTEGER NOT NULL,
             t REAL, x REAL, y REAL, w REAL, h REAL,
-            interp TEXT, fit TEXT, gap INTEGER,
+            interp TEXT, fit TEXT, gap INTEGER, dynamic INTEGER, moving INTEGER,
             PRIMARY KEY (job_key, box, idx),
             FOREIGN KEY (job_key) REFERENCES jobs(key) ON DELETE CASCADE
         )''')
@@ -158,13 +171,14 @@ _init_db()
 def _read_boxes(conn, key: str) -> dict:
     boxes: dict = {1: [], 2: []}
     rows = conn.execute(
-        "SELECT box, t, x, y, w, h, interp, fit, gap FROM keyframes "
+        "SELECT box, t, x, y, w, h, interp, fit, gap, dynamic, moving FROM keyframes "
         "WHERE job_key=? ORDER BY box, idx", (key,))
     for r in rows:
         boxes.setdefault(r["box"], []).append({
             "t": r["t"], "x": r["x"], "y": r["y"], "w": r["w"], "h": r["h"],
             "interp": r["interp"] or "hold", "fit": r["fit"] or "cover",
-            "gap": bool(r["gap"]),
+            "gap": bool(r["gap"]), "dynamic": bool(r["dynamic"]),
+            "moving": bool(r["moving"]),
         })
     return boxes
 
@@ -173,11 +187,12 @@ def _write_box(conn, key: str, box: int, kfs) -> None:
     conn.execute("DELETE FROM keyframes WHERE job_key=? AND box=?", (key, box))
     for idx, kf in enumerate(kfs or []):
         conn.execute(
-            "INSERT INTO keyframes (job_key, box, idx, t, x, y, w, h, interp, fit, gap) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO keyframes (job_key, box, idx, t, x, y, w, h, interp, fit, gap, dynamic, moving) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (key, box, idx, kf.get("t", 0.0), kf.get("x", 0.0), kf.get("y", 0.0),
              kf.get("w", 0.0), kf.get("h", 0.0), kf.get("interp", "hold"),
-             kf.get("fit", "cover"), 1 if kf.get("gap") else 0))
+             kf.get("fit", "cover"), 1 if kf.get("gap") else 0,
+             1 if kf.get("dynamic") else 0, 1 if kf.get("moving") else 0))
 
 
 def _row_to_job(conn, row) -> dict:
@@ -250,7 +265,8 @@ def _to_float(v) -> Optional[float]:
         return None
 
 
-def _clip_to_job(url: str, clip: dict, default_context: str = "") -> dict:
+def _clip_to_job(url: str, clip: dict, default_context: str = "",
+                 default_director: bool = False, default_diar: bool = False) -> dict:
     cid = str(clip.get("id") or uuid.uuid4().hex[:8])
     return {
         "key": uuid.uuid4().hex[:12],   # internal, URL-safe id used by the API
@@ -266,10 +282,6 @@ def _clip_to_job(url: str, clip: dict, default_context: str = "") -> dict:
         # describe the layout once (per-clip "context", or the file-level
         # "_context" default) and keep bbox_1/bbox_2 as short instructions.
         "context": str(clip.get("context") or clip.get("system") or default_context or ""),
-        # Filled by the worker after download: the model "studies" a frame first
-        # and writes its own observation (streamer appearance, content type) —
-        # merged as [observation] + [context] + [bbox prompt].
-        "auto_context": None,
         # Optional per-clip illustration segment length (illustrator only) — pre-fills
         # the Illustration step so the user just picks. Ignored by clipper.
         "segment_seconds": _to_float(clip.get("segment_seconds")
@@ -283,6 +295,16 @@ def _clip_to_job(url: str, clip: dict, default_context: str = "") -> dict:
         # on a ~1s coarse grid and only subdivides where something changes.
         "step_seconds": _to_float(clip.get("step") if clip.get("step") is not None
                                   else clip.get("precision")),
+        # Phase 2/3 per-clip toggles (default off). director = windowed shot-director
+        # pre-pass (frames + transcript → richer segments + pan flag); diarization =
+        # add the dominant-speaker hint. Both degrade gracefully when off/unavailable.
+        # transcript = write-through Whisper cache (filled at predict time when the
+        # director is on, reused by render so Whisper isn't run twice).
+        "director": 1 if (clip.get("director") if clip.get("director") is not None
+                          else default_director) else 0,
+        "diarization": 1 if (clip.get("diarization") if clip.get("diarization") is not None
+                             else default_diar) else 0,
+        "transcript": None,
         "status": "pending",
         "message": "queued",
         "job_id": None,                 # temp/{job_id}.mp4 once downloaded
@@ -293,15 +315,21 @@ def _clip_to_job(url: str, clip: dict, default_context: str = "") -> dict:
     }
 
 
-def import_text(content: str) -> dict:
-    """Parse the JSON and insert new jobs (skipping ids already queued). Returns
-    {added, skipped, total}. Wakes the worker so processing starts immediately."""
+def import_text(content: str, room_id=None) -> dict:
+    """Parse the JSON and insert new jobs (skipping ids already queued). Every new
+    job joins `room_id` (the room the user has selected; None = unassigned).
+    Returns {added, skipped, total}. Wakes the worker so processing starts."""
     data = _parse(content)
     if not isinstance(data, dict):
         raise ValueError("top level must be an object keyed by video URL")
     # File-level shared context: a top-level "_context" key (underscore = clearly
     # not a URL) becomes the default `context` for every clip in the file.
     default_context = str(data.pop("_context", "") or "")
+    # File-level defaults for the Phase 2/3 toggles (per-clip "director"/"diarization"
+    # override these). underscore = clearly not a URL, popped before the URL loop.
+    default_director = bool(data.pop("_director", False))
+    default_diar = bool(data.pop("_diarization", False))
+    rid = int(room_id) if room_id not in (None, "", "all") else None
 
     added, skipped = 0, 0
     with _lock, _db() as conn:
@@ -312,7 +340,9 @@ def import_text(content: str) -> dict:
             for clip in clips:
                 if not isinstance(clip, dict):
                     continue
-                job = _clip_to_job(str(url), clip, default_context)
+                job = _clip_to_job(str(url), clip, default_context,
+                                   default_director, default_diar)
+                job["room_id"] = rid
                 if job["id"] in existing_ids:
                     skipped += 1
                     continue
@@ -322,6 +352,46 @@ def import_text(content: str) -> dict:
         total = conn.execute("SELECT COUNT(*) AS c FROM jobs").fetchone()["c"]
     _wake.set()
     return {"added": added, "skipped": skipped, "total": total}
+
+
+# ───────────────────────── rooms ─────────────────────────
+def list_rooms() -> list[dict]:
+    with _lock, _db() as conn:
+        rows = conn.execute(
+            "SELECT r.id, r.name, "
+            "(SELECT COUNT(*) FROM jobs j WHERE j.room_id = r.id) AS jobs "
+            "FROM rooms r ORDER BY r.name").fetchall()
+        return [{"id": r["id"], "name": r["name"], "jobs": r["jobs"]} for r in rows]
+
+
+def create_room(name: str) -> dict:
+    """Create a room by name (or return the existing one with that name)."""
+    name = (name or "").strip()
+    if not name:
+        raise ValueError("room name required")
+    with _lock, _db() as conn:
+        row = conn.execute("SELECT id, name FROM rooms WHERE name=?", (name,)).fetchone()
+        if not row:
+            conn.execute("INSERT INTO rooms (name, created) VALUES (?, ?)",
+                         (name, time.time()))
+            row = conn.execute("SELECT id, name FROM rooms WHERE name=?", (name,)).fetchone()
+        return {"id": row["id"], "name": row["name"]}
+
+
+def delete_room(room_id) -> dict:
+    """Delete a room AND every job in it (with their downloaded videos). Reuses
+    delete_job per clip so temp files + keyframes are cleaned up too."""
+    rid = int(room_id)
+    with _lock, _db() as conn:
+        keys = [r["key"] for r in conn.execute(
+            "SELECT key FROM jobs WHERE room_id=?", (rid,))]
+    removed = 0
+    for k in keys:                       # delete_job takes its own lock per call
+        if delete_job(k):
+            removed += 1
+    with _lock, _db() as conn:
+        conn.execute("DELETE FROM rooms WHERE id=?", (rid,))
+    return {"deleted_room": rid, "deleted_jobs": removed}
 
 
 # ───────────────────────── queries / mutations ─────────────────────────
@@ -340,7 +410,7 @@ def list_jobs() -> list[dict]:
                 "key": r["key"], "id": r["id"], "title": r["title"],
                 "status": r["status"], "message": r["message"] or "",
                 "kf1": c.get(1, 0), "kf2": c.get(2, 0),
-                "ready": bool(r["job_id"]),
+                "ready": bool(r["job_id"]), "room_id": r["room_id"],
                 "output_path": r["output_path"], "filename": r["filename"],
             })
         return out
@@ -453,30 +523,6 @@ def delete_job(key: str, cleanup: bool = True) -> bool:
 
 
 # ───────────────────────── background worker ─────────────────────────
-_OBSERVE_QUESTION = (
-    "Look at this video frame. In ONE short sentence, describe the main person on "
-    "camera (gender, skin tone, clothing, accessories). Then in ONE short "
-    "sentence, describe what the other on-screen content area shows, if any. Be "
-    "factual and concise. Do NOT mention left/right/top/bottom positions. Answer "
-    "with the two sentences only."
-)
-
-
-def _observe_clip(src, dur: float) -> Optional[str]:
-    """Let the model study the clip before boxing: describe a mid-clip frame
-    (streamer appearance + content type). Falls back to an early frame. Returns
-    the observation text or None — boxing proceeds without it on failure."""
-    for t in (max(0.5, dur / 2.0), 1.0):
-        b64 = autobox._extract_frame_b64(src, t)
-        if not b64:
-            continue
-        obs = vision.describe(b64, _OBSERVE_QUESTION)
-        if obs:
-            # keep it one line and bounded — it's a prompt prefix, not an essay
-            return " ".join(obs.split())[:400]
-    return None
-
-
 def _norm_step(step) -> float:
     """Per-clip temporal precision (s); 0.4 default, clamped to [0.2, 3]."""
     return 0.4 if step is None else min(3.0, max(0.2, float(step)))
@@ -528,22 +574,14 @@ def _predict_boxes(job: dict) -> None:
         pad = job.get("padding")   # per-clip from the JSON; None → autobox default
         ctx = (job.get("context") or "").strip()
 
-        # The model studies the video FIRST: one observation of a mid-clip frame
-        # (streamer appearance + content type, deliberately WITHOUT sides — the
-        # geometric {side} probe is more reliable for that). Generated once per
-        # job, persisted, and prepended to both box prompts.
-        obs = (job.get("auto_context") or "").strip()
-        if not obs and vision.enabled():
-            obs = _observe_clip(src, dur) or ""
-            if obs:
-                _update(key, auto_context=obs)
-
         def merged(p: str) -> str:
-            # [model observation] + [shared context] + [per-box instruction].
+            # [shared context] + [per-box instruction]. The context describes the
+            # whole scene once (so box1 & box2 don't fight); each bbox prompt is
+            # the specific, detailed subject instruction (long is fine).
             p = (p or "").strip()
             if not p:
                 return p
-            return " ".join(s for s in (obs, ctx, p) if s)
+            return " ".join(s for s in (ctx, p) if s)
 
         notes = []
         stp = job.get("step_seconds")
@@ -554,7 +592,44 @@ def _predict_boxes(job: dict) -> None:
         # boxes real at once, the reel shows the same frame twice)
         segs = None
         w_, h_ = job.get("width") or 0, job.get("height") or 0
-        if (w_ and h_ and vision.enabled()
+        if job.get("director") and w_ and h_ and vision.enabled():
+            # Phase 2: windowed shot-director pre-pass — slide a ~2.5s window over
+            # the clip, show the model frames + the transcript slice + (optional)
+            # the dominant speaker, and build ONE shared timeline (layout/side/pan/
+            # who) both boxes use. Works for placeholder AND person-first prompts.
+            words = None
+            if job.get("transcript"):
+                try:
+                    words = json.loads(job["transcript"])
+                except Exception:  # noqa: BLE001
+                    words = None
+            if words is None:
+                _update(key, message="director: transcribing (Whisper)…")
+                try:
+                    words = transcriber.transcribe(src)
+                    _update(key, transcript=json.dumps(words))   # write-through cache
+                except Exception as e:  # noqa: BLE001
+                    log.warning("director transcribe failed (%s): %s", job["id"], e)
+                    words = []
+            turns = []
+            if job.get("diarization"):
+                try:
+                    import diarize
+                    if diarize.enabled():
+                        _update(key, message="director: diarizing speakers…")
+                        turns = diarize.diarize_turns(src)
+                except Exception as e:  # noqa: BLE001 — diarization is optional
+                    log.warning("diarize failed (%s): %s", job["id"], e)
+                    turns = []
+            _update(key, message="director: analysing windows…")
+            segs, dnote = autobox.run_director(src, 0.0, dur, w_, h_, p1m,
+                                               words=words, turns=turns)
+            segs = segs or None   # director found nothing → fall through to geometric
+            if dnote:
+                notes.append(dnote)
+            if turns:
+                notes.append(f"diarization: {len(set(t['speaker'] for t in turns))} speaker(s)")
+        if (segs is None and w_ and h_ and vision.enabled()
                 and any(t in (p1m + p2m) for t in ("{side}", "{other_side}", "{layout}"))):
             segs = autobox.detect_layout_segments(src, 0.0, dur, w_, h_,
                                                   min_gap=_norm_step(stp))
@@ -603,6 +678,11 @@ def _predict_boxes(job: dict) -> None:
                 box1 = autobox.debounce_track(box1, w=w_, h=h_)
             if box2:
                 box2 = autobox.debounce_track(box2, w=w_, h=h_)
+        # stretches too dynamic to box are left empty + flagged → tell the user
+        # so they know to draw those by hand (the sidebar surfaces it).
+        dyn = sum(1 for k in (box1 or []) + (box2 or []) if k.get("dynamic"))
+        if dyn:
+            notes.append(f"{dyn} dynamic segment(s) — draw manually")
     except Exception as e:  # noqa: BLE001 — download already succeeded; boxes are best-effort
         log.warning("queue predict failed (%s): %s", job["id"], e)
         _update(key, status="ready", box1=None, box2=None,
@@ -636,7 +716,16 @@ def _render_one(job: dict) -> None:
 
     _update(key, status="rendering", message="transcribing (Whisper)…")
     try:
-        words = [Word(**w) for w in transcriber.transcribe(src)]
+        # Reuse the director's write-through transcript cache when present so
+        # Whisper isn't run twice for a director clip.
+        cached = None
+        if job.get("transcript"):
+            try:
+                cached = json.loads(job["transcript"])
+            except Exception:  # noqa: BLE001
+                cached = None
+        raw = cached if cached is not None else transcriber.transcribe(src)
+        words = [Word(**w) for w in raw]
     except Exception as e:  # noqa: BLE001
         log.warning("queue transcribe failed (%s): %s", job["id"], e)
         _update(key, status="error", message=f"transcribe failed: {e}")

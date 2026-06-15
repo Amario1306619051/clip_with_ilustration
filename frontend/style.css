@@ -115,6 +115,13 @@ kbd {
   border-color: var(--border);
 }
 .steps .step.active span { color: var(--accent); }
+.hist-controls { display: flex; gap: 4px; }
+.hist-btn {
+  font-size: 15px; line-height: 1; padding: 4px 9px; border-radius: 5px;
+  border: 1px solid var(--border); background: var(--bg-elev-2); color: var(--text); cursor: pointer;
+}
+.hist-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.hist-btn:disabled { opacity: .35; cursor: default; }
 
 /* ───────── panels ───────── */
 .workspace { padding: 28px; max-width: 1400px; margin: 0 auto; }
@@ -319,6 +326,12 @@ kbd {
   background: #444 !important;
   border-color: var(--text-mute) !important;
   box-shadow: none !important;
+}
+/* DYNAMIC = auto-box gave up here; loud amber so the user spots it to draw. */
+.timeline-dot.dynamic {
+  background: #ff9d2e !important;
+  border-color: #ff9d2e !important;
+  box-shadow: 0 0 0 2px rgba(255, 157, 46, .35) !important;
 }
 .timeline-dot:hover { transform: scale(1.3); }
 
@@ -566,6 +579,59 @@ kbd {
 }
 .box-pill > button[data-clear]:hover { color: var(--danger); }
 .hint { color: var(--text-mute); font-size: 11px; margin-left: auto; }
+
+/* ── Crop cut bars (Crop step) ── */
+.cut-lanes { margin: 6px 0 2px; display: flex; flex-direction: column; gap: 4px; }
+.cut-lane { display: flex; align-items: center; height: 20px; gap: 10px; }
+.cut-lane-lbl {
+  width: 48px; font-size: 10px; color: var(--text-mute);
+  text-transform: uppercase; letter-spacing: .06em;
+}
+.cut-lane-track {
+  position: relative; flex: 1; height: 100%;
+  background: repeating-linear-gradient(45deg, transparent 0 5px, rgba(255,255,255,.025) 5px 10px);
+  border: 1px solid var(--border); border-radius: 4px;
+}
+.cut-lane-empty {
+  position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+  font-size: 10px; color: var(--text-mute); font-style: italic;
+}
+.cut-bar {
+  position: absolute; top: 1px; bottom: 1px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 3px; cursor: move; overflow: hidden;
+  background: rgba(94,224,255,.20); border: 1px solid var(--box-1);
+}
+.cut-lane[data-box="2"] .cut-bar { background: rgba(255,110,199,.20); border-color: var(--box-2); }
+.cut-bar.on { cursor: move; }
+.cut-bar.gap {
+  background: repeating-linear-gradient(45deg, rgba(120,120,135,.30) 0 4px, transparent 4px 8px);
+  border: 1px dashed var(--text-mute);
+}
+.cut-bar.dynamic {
+  background: repeating-linear-gradient(45deg, rgba(255,157,46,.40) 0 4px, transparent 4px 8px);
+  border: 1px dashed #ff9d2e;
+}
+.cut-bar-lbl {
+  font-size: 9px; font-weight: 700; letter-spacing: .04em;
+  color: var(--text); pointer-events: none; white-space: nowrap;
+  text-shadow: 0 1px 2px rgba(0,0,0,.6);
+}
+.cut-bar-h {
+  position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 2;
+  background: rgba(255,255,255,.35);
+}
+.cut-bar-h.l { left: 0; border-radius: 3px 0 0 3px; }
+.cut-bar-h.r { right: 0; border-radius: 0 3px 3px 0; }
+.cut-bar-h:hover { background: rgba(255,255,255,.7); }
+
+.cut-controls { display: flex; align-items: center; gap: 8px; margin: 6px 0; flex-wrap: wrap; }
+.cut-controls-lbl { font-size: 11px; color: var(--text-dim); }
+.cut-btn {
+  font-size: 11px; padding: 3px 9px; border-radius: 4px;
+  border: 1px solid var(--border); background: var(--bg-elev-2); color: var(--text); cursor: pointer;
+}
+.cut-btn:hover { border-color: var(--danger); color: var(--danger); }
 
 /* preview */
 .preview-wrap {
@@ -855,6 +921,33 @@ kbd {
 .kf-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .kf-seg { font-size: 11px; color: var(--accent); }
 .kf-dim { font-size: 11px; color: var(--text-dim); flex: 1; }
+/* DYNAMIC row: needs attention, not muted — amber accent bar + badge. */
+.kf-row.dynamic { border-left: 3px solid #ff9d2e; padding-left: 5px; }
+.kf-seg-dyn { color: #ffb866 !important; }
+.kf-seg-dyn .dyn-tag {
+  display: inline-block;
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: .08em;
+  color: #0a0a0a;
+  background: #ff9d2e;
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-right: 6px;
+}
+/* TRACKED chip — panning track (director / dynamic subject): size locked, center pans */
+.kf-row.moving { border-left: 3px solid #36d399; padding-left: 5px; }
+.mov-tag {
+  display: inline-block;
+  font-weight: 700;
+  font-size: 9px;
+  letter-spacing: .08em;
+  color: #0a0a0a;
+  background: #36d399;
+  border-radius: 999px;
+  padding: 1px 7px;
+  margin-left: 6px;
+}
 .kf-tag {
   font-size: 10px;
   padding: 2px 6px;
@@ -1042,3 +1135,15 @@ kbd {
 .queue-progress-bar { height: 6px; background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 99px; overflow: hidden; }
 .queue-progress-bar span { display: block; height: 100%; width: 0; background: var(--accent); border-radius: 99px; transition: width .4s ease; }
 .queue-progress-txt { font-size: 10px; color: var(--text-dim); margin-top: 3px; font-variant-numeric: tabular-nums; }
+
+/* Room bar (queue grouping) */
+.room-bar { display: flex; align-items: center; gap: 5px; margin: 6px 0; }
+.room-bar select {
+  flex: 1; min-width: 0; font-size: 11px; padding: 3px 6px; border-radius: 4px;
+  background: var(--bg-elev-2); color: var(--text); border: 1px solid var(--border);
+}
+.q-room {
+  margin-left: 6px; font-size: 9px; letter-spacing: .04em; color: var(--accent);
+  border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px;
+}
+.queue-empty-room { font-size: 11px; color: var(--text-mute); font-style: italic; padding: 8px 2px; list-style: none; }

@@ -407,13 +407,47 @@ def _crop_chain_segmented(input_label: str, kfs: list[dict],
         )
         return parts
 
-    splits = [f"{out_label}_sp{j}" for j in range(len(real_idx))]
-    parts.append(f"[{input_label}]split={len(real_idx)}{''.join('[' + s + ']' for s in splits)}")
+    # Group consecutive real kfs into RUNS of identical w/h. crop's w/h are
+    # init-locked, but WITHIN a constant-size run x/y CAN animate per-frame — so
+    # a run of >=2 same-size kfs is emitted as ONE expression-crop (x/y via
+    # _build_expr, which honors each kf's hold/linear interp) instead of one
+    # literal crop per kf. This keeps a Phase-1 size-locked center-pan SMOOTH
+    # even when the box ALSO has a differently-sized static segment (which is
+    # what flips the box onto this segmented path). Size still steps BETWEEN
+    # runs (crop can't do per-frame w/h). A lone kf stays a literal crop.
+    def _run_len(start: int) -> int:
+        wh = (round(kfs[real_idx[start]]["w"], 1), round(kfs[real_idx[start]]["h"], 1))
+        length = 1
+        while (start + length < len(real_idx)
+               # must be ADJACENT in the original kf array (no gap kf between them,
+               # or the gap's black window would get covered by the merged crop)
+               and real_idx[start + length] == real_idx[start + length - 1] + 1
+               and (round(kfs[real_idx[start + length]]["w"], 1),
+                    round(kfs[real_idx[start + length]]["h"], 1)) == wh):
+            length += 1
+        return length
+
+    runs: list[list[int]] = []   # each run = list of real_idx positions
+    p = 0
+    while p < len(real_idx):
+        rl = _run_len(p)
+        runs.append(list(range(p, p + rl)))
+        p += rl
+
+    splits = [f"{out_label}_sp{j}" for j in range(len(runs))]
+    parts.append(f"[{input_label}]split={len(runs)}{''.join('[' + s + ']' for s in splits)}")
 
     seg_info: list[tuple[str, float, float]] = []
-    for j, i in enumerate(real_idx):
-        k = kfs[i]
-        crop = f"crop={int(k['w'])}:{int(k['h'])}:{int(k['x'])}:{int(k['y'])}"
+    for j, run in enumerate(runs):
+        i0 = real_idx[run[0]]
+        k = kfs[i0]
+        if len(run) > 1:
+            # constant-size run → animate x/y per-frame, w/h literal & constant.
+            run_kfs = [kfs[real_idx[r]] for r in run]
+            crop = (f"crop={int(k['w'])}:{int(k['h'])}"
+                    f":x='{_build_expr(run_kfs, 'x')}':y='{_build_expr(run_kfs, 'y')}'")
+        else:
+            crop = f"crop={int(k['w'])}:{int(k['h'])}:{int(k['x'])}:{int(k['y'])}"
         seg = f"{out_label}_seg{j}"
         if k["fit"] == "blur_pad":
             parts.append(f"[{splits[j]}]{crop},setsar=1,split=2[{seg}a][{seg}b]")
@@ -422,8 +456,9 @@ def _crop_chain_segmented(input_label: str, kfs: list[dict],
             parts.append(f"[{seg}bg][{seg}fg]overlay=(W-w)/2:(H-h)/2,setsar=1[{seg}]")
         else:
             parts.append(f"[{splits[j]}]{crop},{cover_filters},setsar=1[{seg}]")
-        t0 = 0.0 if i == 0 else k["t"]
-        t1 = kfs[i + 1]["t"] if i + 1 < n else 1e9
+        t0 = 0.0 if i0 == 0 else k["t"]
+        last_i = real_idx[run[-1]]
+        t1 = kfs[last_i + 1]["t"] if last_i + 1 < n else 1e9
         seg_info.append((seg, t0, t1))
 
     parts.append(f"color=c=black:s={out_w}x{out_h}:r=30[{out_label}_base]")

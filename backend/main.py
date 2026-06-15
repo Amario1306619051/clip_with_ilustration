@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import autobox
 import batchqueue as batch_queue
+import diarize
 import downloader
 import illustrator
 import renderer
@@ -25,7 +26,7 @@ from models import (
     CleanupRequest,
     AutoBoxRequest, AutoBoxResponse,
     ThumbnailTextRequest, ThumbnailTextResponse,
-    QueueImportRequest, QueueJobPatch,
+    QueueImportRequest, QueueJobPatch, RoomCreate,
     SoundPatch,
 )
 
@@ -133,6 +134,19 @@ def api_autobox(req: AutoBoxRequest):
         src = downloader.get_source_path(req.job_id)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    # Director mode: transcribe inline (semantic context) and, if asked + available,
+    # diarize for the speaker hint. Both best-effort — degrade to the plain path.
+    words, turns = None, None
+    if req.director:
+        try:
+            words = transcriber.transcribe(src)
+        except Exception:  # noqa: BLE001
+            words = None
+        if req.diarization and diarize.enabled():
+            try:
+                turns = diarize.diarize_turns(src)
+            except Exception:  # noqa: BLE001
+                turns = None
     try:
         out = autobox.predict_track(
             src, req.prompt, req.t_start, req.t_end,
@@ -141,6 +155,7 @@ def api_autobox(req: AutoBoxRequest):
             # the single crop box follows the streamer — tells fullscreen layout
             # segments to use the whole frame (only matters with {layout} prompts)
             role={1: "streamer"}.get(req.box),
+            use_director=req.director, words=words, turns=turns,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -151,7 +166,8 @@ def api_autobox(req: AutoBoxRequest):
            f" (every {out['step']}s).{cap_note}"
            if kfs else
            f"No '{req.prompt.strip()}' found in {out['sampled']} frames — try a different prompt or range.")
-    return {"keyframes": kfs, "sampled": out["sampled"], "detected": out["detected"], "message": msg}
+    return {"keyframes": kfs, "sampled": out["sampled"], "detected": out["detected"],
+            "message": msg, "director_note": out.get("director_note", "")}
 
 
 @app.post("/api/thumbnail-text", response_model=ThumbnailTextResponse)
@@ -172,7 +188,8 @@ def api_thumbnail_text(req: ThumbnailTextRequest):
 def api_capabilities():
     """Lets the frontend hide/disable the AI auto-box (vision) and the thumbnail
     headline ideas (text model) when the endpoints aren't configured."""
-    return {"vision": vision.enabled(), "thumbnail": thumbnail.enabled()}
+    return {"vision": vision.enabled(), "thumbnail": thumbnail.enabled(),
+            "diarize": diarize.enabled()}
 
 
 @app.post("/api/cleanup")
@@ -186,11 +203,33 @@ def api_cleanup(req: CleanupRequest):
 def api_queue_import(req: QueueImportRequest):
     """Upload a JSON of clips ({url: [{id,start,end,title,description,bbox_1,bbox_2}]}).
     Each clip becomes a queued job the background worker downloads + auto-boxes
-    (bbox_1 = the single crop box prompt; bbox_2 is ignored in illustrator)."""
+    (bbox_1 = the single crop box prompt; bbox_2 is ignored in illustrator).
+    `room_id` (optional) groups the new jobs under a room."""
     try:
-        return batch_queue.import_text(req.content)
+        return batch_queue.import_text(req.content, room_id=req.room_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"could not parse JSON: {e}")
+
+
+# ───────────────────────── rooms ─────────────────────────
+@app.get("/api/rooms")
+def api_rooms_list():
+    """Streamer/project groups for the queue sidebar (id, name, job count)."""
+    return {"rooms": batch_queue.list_rooms()}
+
+
+@app.post("/api/rooms")
+def api_rooms_create(req: RoomCreate):
+    try:
+        return batch_queue.create_room(req.name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/api/rooms/{room_id}")
+def api_rooms_delete(room_id: int):
+    """Delete a room AND every job in it (with their downloaded videos)."""
+    return batch_queue.delete_room(room_id)
 
 
 @app.get("/api/queue")

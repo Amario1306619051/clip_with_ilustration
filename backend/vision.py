@@ -20,6 +20,7 @@ and aspect ratios):
 Frames may be downscaled before sending (normalized coords are scale-free, so we
 still convert with the SOURCE dimensions).
 """
+import json
 import logging
 import os
 import re
@@ -194,6 +195,100 @@ def detect_side(image_b64: str, subject: str = "the streamer's webcam panel (the
     if "right" in text:
         return "right"
     return None
+
+
+_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+_OBJ_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+def _parse_json(text: str) -> Optional[dict]:
+    """Best-effort extract a single JSON OBJECT from a model reply — tolerant of
+    ```json fences, leading prose, and trailing junk (same regex-not-json.loads
+    stance as _parse_boxes). Returns a dict or None; never raises."""
+    if not text:
+        return None
+    t = text.strip()
+    m = _FENCE_RE.search(t)
+    if m:
+        t = m.group(1).strip()
+    m = _OBJ_RE.search(t)
+    if not m:
+        return None
+    try:
+        obj = json.loads(m.group(0))
+    except Exception:  # noqa: BLE001 — malformed JSON is expected sometimes
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+# Built by concatenation (NOT str.format) so user/context text with { } is safe.
+_DIRECTOR_TAIL = (
+    "\nDecide, for THIS window, the layout and which boxes are present. "
+    "Reply with ONLY a compact JSON object — no prose, no markdown, no code fences:\n"
+    '{"layout":"split|overlay|full|fullcontent",'
+    '"box1_present":true,"box2_present":false,'
+    '"box1_side":"left|right|screen",'
+    '"box1_desc":"a few words: WHO/WHAT box1 is in this window",'
+    '"subject_moving":false,"confidence":0.0}\n'
+    "layout: 'split' = the main person beside a SECOND region (a co-host/guest in "
+    "their own panel OR a content area); 'overlay' = a small webcam over fullscreen "
+    "content; 'full' = the person fills the screen; 'fullcontent' = content/text "
+    "fills the screen.\n"
+    "subject_moving: true ONLY if box1's subject clearly MOVES or changes size a lot "
+    "across these frames (walking, handheld, fast zoom) so one fixed box can't hold "
+    "it — otherwise false.\n"
+    "box1_side: which side box1 is on in a split ('screen' if it fills the frame).\n"
+    "confidence: 0..1, how sure you are of the layout."
+)
+
+
+def director(frames_b64: list, prompt: str = "", context: str = "",
+             transcript: str = "", main_speaker: Optional[str] = None,
+             max_tokens: int = 700) -> Optional[dict]:
+    """Multi-frame 'shot director' for ONE short window: shows K chronological
+    frames + the box instruction + (optional) the transcript slice + (optional) a
+    dominant-speaker hint, and asks for a STRICT JSON verdict about the window
+    (layout / which boxes present / subject_moving / which side box1 is). Returns
+    the parsed dict or None on any failure.
+
+    enable_thinking=False is REQUIRED: the endpoint is a reasoning model — with
+    thinking on it spends the whole token budget on <think> and returns no content
+    (measured: empty content, finish=length). With it off, a 5-frame window
+    returns a clean JSON verdict."""
+    if not enabled() or not frames_b64:
+        return None
+    head = ("You are a vertical-video shot director. The " + str(len(frames_b64))
+            + " images are consecutive frames (chronological) from ONE short "
+            "window of a clip.\n")
+    if (context or "").strip():
+        head += "CONTEXT: " + context.strip() + "\n"
+    if (prompt or "").strip():
+        head += "WHAT box1 SHOULD BE: " + prompt.strip() + "\n"
+    if (transcript or "").strip():
+        head += ("TRANSCRIPT (what is said in this window — may help pick the "
+                 "active speaker): " + transcript.strip()[:600] + "\n")
+    if main_speaker:
+        head += ("AUDIO HINT: the dominant speaker in this window is labelled "
+                 + str(main_speaker) + " (a diarization label, not a name — use it "
+                 "only as a tie-breaker for who box1 is).\n")
+    content = [{"type": "text", "text": head + _DIRECTOR_TAIL}]
+    for f in frames_b64:
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{f}"}})
+    try:
+        resp = _client().chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": content}],
+            temperature=0,
+            max_tokens=max_tokens,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        # read choices INSIDE the try — an empty/odd response must not abort the
+        # whole windowed director run; it just drops this one window.
+        return _parse_json(resp.choices[0].message.content or "")
+    except Exception as e:  # noqa: BLE001 — per-window best-effort
+        log.warning("vision.director request failed: %s", e)
+        return None
 
 
 def detect_box(image_b64: str, prompt: str, frame_w: int, frame_h: int) -> Optional[dict]:

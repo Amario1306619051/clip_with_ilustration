@@ -298,25 +298,33 @@ def _resolve_side(source_path: Path, times: list, w: int, h: int) -> str:
 # model needs a CONCRETE structural description; vague wording measurably
 # degrades boxing). Chosen per layout segment by _detect_layout_segments.
 _LAYOUT_PHRASES = {
-    "split": "The screen is split into two side-by-side panels: the person's camera panel and a separate content panel, each spanning the full height.",
-    "overlay": "A content area fills most of the screen, and the person's camera is a smaller overlay window drawn on top of it.",
-    "full": "The person's camera fills the entire screen here; there is NO separate content panel in this part of the video.",
-    "fullcontent": "A content area fills the entire screen here; the person's camera is NOT visible in this part of the video.",
+    "split": "The screen is split into two side-by-side panels, each spanning the full height: the main on-camera person's panel and a second panel beside it (a co-host/guest, or a content area).",
+    "overlay": "A larger area fills most of the screen, with the main on-camera person shown as a smaller overlay window drawn on top of it.",
+    "full": "The main on-camera person fills the entire screen here; there is NO second panel in this part of the video.",
+    "fullcontent": "A second region — a content area or another person — fills the entire screen here; the main on-camera person is NOT visible in this part of the video.",
 }
 
-_CONTENT_PROBE_PROMPT = ("a separate on-screen content area distinct from the main "
-                         "on-camera person — another video, image, screenshot, slide, "
-                         "graphic, game feed, social-media post, comment, or text. "
-                         "People shown INSIDE that content (e.g. in a comment, a "
-                         "screenshot, or the video shown) are PART of the content — "
-                         "include them (NOT the host/presenter's own camera)")
+# box2's subject is GENERAL: a second person (co-host/guest) OR a content area. The
+# specific per-clip subject lives in bbox_2; this probe only needs to recognize
+# that SOME distinct second region exists beside the main person, while keeping the
+# "a face inside shown content is part of that content" guard (else it boxes a
+# person inside a meme/video instead of the meme region).
+_CONTENT_PROBE_PROMPT = ("a separate on-screen region distinct from the main "
+                         "on-camera person — EITHER a second person shown in their own "
+                         "camera panel beside the host (a co-host or guest), OR a "
+                         "content area: another video, image, screenshot, slide, "
+                         "graphic, game feed, social-media post, comment, or text. A "
+                         "person shown INSIDE a video, image, screenshot, or post is "
+                         "PART of that content — box the whole content region, not that "
+                         "person alone (NOT the host/presenter's own camera)")
 
 _CONTENT_PRESENT_QUESTION = (
     "Besides the main on-camera person and their room/background, is there a "
-    "SEPARATE content area on screen right now — another video, image, slide, "
-    "graphic, game feed, social-media post, comment, screenshot, or text — in "
-    "its own panel distinct from that person? A plain wall, shelves, or studio "
-    "background is NOT content. Answer with one word: yes or no.")
+    "SEPARATE region on screen right now in its own panel distinct from that "
+    "person — either a SECOND person (a co-host or guest beside them), or a content "
+    "area (another video, image, slide, graphic, game feed, social-media post, "
+    "comment, screenshot, or text)? A plain wall, shelves, or studio background is "
+    "NOT it. Answer with one word: yes or no.")
 
 _CAM_PRESENT_QUESTION = ("Is the main on-camera person (the host or speaker talking to "
                          "the camera) visible in this frame? A face that is PART of "
@@ -904,8 +912,11 @@ def debounce_track(kfs: list, min_hold: float = 0.6, w: int = 0, h: int = 0) -> 
         for i in range(1, len(out) - 1):
             prev, cur, nxt = out[i - 1], out[i], out[i + 1]
             hold = nxt["t"] - cur["t"]
-            # cur is a short blip that differs from prev, and prev≈next → revert
-            if hold < min_hold and far(prev, cur) and not far(prev, nxt):
+            # cur is a short blip that differs from prev, and prev≈next → revert.
+            # A DYNAMIC marker is intentional, never a blip — never debounce it
+            # away; nor a MOVING (panning) kf, whose small per-kf steps ARE the pan.
+            if (not cur.get("dynamic") and not cur.get("moving")
+                    and hold < min_hold and far(prev, cur) and not far(prev, nxt)):
                 out.pop(i)
                 changed = True
                 break
@@ -927,22 +938,83 @@ def _fill_placeholders(prompt: str, layout, side) -> str:
     return " ".join(p.split())
 
 
+# Dynamic-segment thresholds: a stretch whose box MOVES or RESIZES a lot — not
+# the sub-second flicker debounce_track removes, but sustained large motion — has
+# no single box that represents it. Rather than emit a jittery guess we leave it
+# empty (a gap) and flag it so the UI marks it for MANUAL drawing. Conservative on
+# purpose: a normal talking head pans/zooms far less than this, so it still boxes.
+_DYN_MOVE_FRAC = 0.12   # center wander (MAD / frame dim) past which it's "dynamic"
+_DYN_SIZE_FRAC = 0.40   # size spread (p85-p15)/median past which it's "dynamic"
+
+
+def _segment_is_dynamic(dets: list, w: int, h: int) -> bool:
+    """True when a segment's detections move/resize so much that no locked box
+    fairly represents it (sustained, not the brief reverts debounce_track drops).
+    Measured on the post-outlier-rejection hits; too few hits to judge → not
+    dynamic (let the normal pipeline box it)."""
+    if len(dets) < 5:
+        return False
+    cxs = sorted(b["x"] + b["w"] / 2.0 for _, b in dets)
+    cys = sorted(b["y"] + b["h"] / 2.0 for _, b in dets)
+    mcx, mcy = cxs[len(cxs) // 2], cys[len(cys) // 2]
+    madx = sorted(abs(c - mcx) for c in cxs)[len(cxs) // 2]
+    mady = sorted(abs(c - mcy) for c in cys)[len(cys) // 2]
+    if madx > w * _DYN_MOVE_FRAC or mady > h * _DYN_MOVE_FRAC:
+        return True
+
+    def spread(vals):
+        vals = sorted(vals)
+        n = len(vals)
+        med = vals[n // 2]
+        if med <= 0:
+            return 0.0
+        p15 = vals[max(0, int(n * 0.15))]
+        p85 = vals[min(n - 1, int(n * 0.85))]
+        return (p85 - p15) / med
+
+    if (spread([b["w"] for _, b in dets]) > _DYN_SIZE_FRAC
+            or spread([b["h"] for _, b in dets]) > _DYN_SIZE_FRAC):
+        return True
+    return False
+
+
 def _track_segment(results: list, w: int, h: int, padding: float,
-                   smooth: bool, lock_size: bool):
+                   smooth: bool, lock_size: bool,
+                   subject_moving: Optional[bool] = None):
     """The single-layout pipeline (outlier rejection → pad → smooth → size lock →
     static pin → interior bridge → keyframes), applied to ONE segment's samples.
-    Returns (keyframes, raw_detected)."""
+    Returns (keyframes, raw_detected, dynamic).
+
+    A segment whose subject MOVES a lot (sustained pan/zoom, or the director
+    flagging `subject_moving`) is no longer left BLACK — it becomes a SMOOTHED,
+    SIZE-LOCKED, CENTER-PANNING track (the static pin is skipped so the box
+    follows the subject) with every non-gap kf tagged `moving=True`. That tag
+    tells the downstream geometry snaps / debounce / hold-override to leave the
+    pan alone. `subject_moving`: None = auto-detect via _segment_is_dynamic;
+    True/False = explicit override (e.g. from the director). The returned
+    `dynamic` is kept for call-site back-compat but is always False now — the
+    panning track replaces the old black-slot behaviour the owner asked to drop
+    ("dibuat aja dulu, nanti yang salah bisa saya hapus")."""
     det_items = [(t, b) for t, b in results if b]
     det_items = _reject_outliers(det_items)
     if padding and padding > 0:
         det_items = [(t, _pad(b, padding, w, h)) for t, b in det_items]
     raw_detected = len(det_items)
+    # Decide whether this segment PANS (locked size, center follows — no static
+    # pin) instead of pinning to one box. Director override wins; else auto-detect
+    # sustained motion. Needs lock_size (adaptive mode already keeps the raw
+    # moving track) and enough hits to trust the motion.
+    if subject_moving is None:
+        moving = bool(lock_size) and _segment_is_dynamic(det_items, w, h)
+    else:
+        moving = bool(subject_moving) and bool(lock_size) and raw_detected >= 5
     if smooth and len(det_items) >= 3:
         det_items = _smooth(det_items)
     pinned = False
     if lock_size:
         det_items = _stabilize_size(det_items, w, h)
-        det_items, pinned = _lock_static(det_items, w, h)
+        if not moving:
+            det_items, pinned = _lock_static(det_items, w, h)
     proc = {t: b for t, b in det_items}
     # Pinned static segment → the panel is there from first to last sighting;
     # interior misses are model noise, bridge them (boundary misses stay gaps).
@@ -954,7 +1026,15 @@ def _track_segment(results: list, w: int, h: int, padding: float,
                 proc[t] = dict(static_box)
     seq = [(t, proc.get(t)) for t, _ in results]
     kfs, _ = _build_keyframes(seq, w, h)
-    return kfs, raw_detected
+    if moving:
+        # tag the panning track so debounce / the hold-override / the split-
+        # geometry snaps leave it alone, and the UI shows a 'TRACKED' chip.
+        for k in kfs:
+            if not k.get("gap"):
+                k["moving"] = True
+    # `dynamic` is retired (a moving subject pans instead of going black); always
+    # return False so the caller never emits a black dynamic gap.
+    return kfs, raw_detected, False
 
 
 def classify_fullscreen_owner(source_path: Path, t: float, w: int, h: int):
@@ -1002,8 +1082,9 @@ def merge_double_gaps(kfs1: list, kfs2: list, w: int, h: int, classify=None) -> 
     inf = float("inf")
 
     def gap_intervals(kfs):
+        # a DYNAMIC gap is deliberate (the user draws it) — never auto-fill it
         return [(k["t"], kfs[i + 1]["t"] if i + 1 < len(kfs) else inf)
-                for i, k in enumerate(kfs) if k.get("gap")]
+                for i, k in enumerate(kfs) if k.get("gap") and not k.get("dynamic")]
 
     overlaps = []
     for a0, a1 in gap_intervals(kfs1):
@@ -1068,7 +1149,7 @@ def resolve_split_overlap(kfs1: list, kfs2: list, w: int, h: int,
     orig1, orig2 = [dict(k) for k in kfs1], [dict(k) for k in kfs2]
     out1, out2 = [dict(k) for k in kfs1], [dict(k) for k in kfs2]
     for i, k in enumerate(out1):
-        if k.get("gap"):
+        if k.get("gap") or k.get("moving"):   # never snap a panning track
             continue
         o = _active_kf(orig2, k["t"])
         if o and not o.get("gap"):
@@ -1076,7 +1157,7 @@ def resolve_split_overlap(kfs1: list, kfs2: list, w: int, h: int,
             if r:
                 k["x"], k["w"] = r
     for i, k in enumerate(out2):
-        if k.get("gap"):
+        if k.get("gap") or k.get("moving"):   # never snap a panning track
             continue
         o = _active_kf(orig1, k["t"])
         if o and not o.get("gap"):
@@ -1103,14 +1184,14 @@ def expand_content_to_seam(kfs1: list, kfs2: list, w: int, h: int) -> list:
         return kfs[i]["t"], (kfs[i + 1]["t"] if i + 1 < len(kfs) else inf)
 
     def is_split_panel(b1):
-        return (not b1.get("gap")
+        return (not b1.get("gap") and not b1.get("moving")
                 and b1["w"] < 0.85 * w              # partial panel, not fullscreen
                 and b1["h"] > 0.90 * h)             # full height → side-by-side split
 
     out = []
     for j, k in enumerate(kfs2):
         k = dict(k)
-        if not k.get("gap"):
+        if not k.get("gap") and not k.get("moving"):   # leave a panning box2 alone
             a2, b2 = reign(kfs2, j)
             # the box2 kf's reign can span several box1 segments (boundaries
             # don't always align) → use the box1 panel that overlaps it LONGEST
@@ -1152,7 +1233,8 @@ def dedupe_fullframe_pair(kfs1: list, kfs2: list, w: int, h: int) -> list:
         return kfs[i]["t"], (kfs[i + 1]["t"] if i + 1 < len(kfs) else inf)
 
     def isfull(k):
-        return (not k.get("gap")) and k["w"] >= 0.92 * w and k["h"] >= 0.92 * h
+        return ((not k.get("gap")) and not k.get("moving")
+                and k["w"] >= 0.92 * w and k["h"] >= 0.92 * h)
 
     out = []
     for j, k in enumerate(kfs2):
@@ -1170,6 +1252,129 @@ def dedupe_fullframe_pair(kfs1: list, kfs2: list, w: int, h: int) -> list:
     return out
 
 
+# ── Windowed shot-director pre-pass (Phase 2) ──────────────────────────────
+_DIR_WIN = 2.5         # director window width (s)
+_DIR_STEP = 1.0        # director window hop (s)
+_DIR_FRAMES = 5        # frames shown to the director per window
+_DIR_LEAD = 0.3        # nudge a boundary slightly earlier (mirrors layout segments)
+_DIR_MAX_WINDOWS = 48  # cost cap: widen the hop on long clips
+
+
+def run_director(source_path: Path, t0: float, t1: float, w: int, h: int,
+                 prompt: str, words: Optional[list] = None,
+                 turns: Optional[list] = None) -> tuple:
+    """Phase 2 'shot director' pre-pass. Slide a ~2.5s window over [t0,t1]; per
+    window show vision.director() K frames + the transcript slice + the dominant
+    speaker (from diarization `turns`, if any), then reconcile the per-window
+    verdicts into a CONTIGUOUS segment timeline of the same shape
+    detect_layout_segments emits, plus extra keys `moving` (pan this segment) and
+    `box1_desc` (who/what box1 is — appended to box1's prompt by predict_track).
+    Returns (segments, note). segments == [] when the director produced nothing
+    (the caller then falls back to the geometric segmenter / single segment)."""
+    if not vision.enabled() or t1 <= t0:
+        return [], ""
+    words = words or []
+    turns = turns or []
+    span = t1 - t0
+    hop = max(_DIR_STEP, span / _DIR_MAX_WINDOWS)
+    starts = []
+    s = t0
+    while s < t1 - 1e-3:
+        starts.append(round(s, 3))
+        s += hop
+    if not starts:
+        starts = [t0]
+
+    cache: dict = {}
+
+    def frame(t):
+        k = round(t, 2)
+        if k not in cache:
+            cache[k] = _extract_frame_b64(source_path, k)
+        return cache[k]
+
+    try:
+        import diarize as _diar          # pure-python dominant_speaker (no pyannote)
+    except Exception:  # noqa: BLE001
+        _diar = None
+
+    def one_window(ws: float):
+        we = min(ws + _DIR_WIN, t1)
+        pts = [ws + (we - ws) * (i + 0.5) / _DIR_FRAMES for i in range(_DIR_FRAMES)]
+        frames = [f for f in (frame(t) for t in pts) if f]
+        if not frames:
+            return None
+        tr = " ".join(x.get("word", "") for x in words
+                      if x.get("start", 0.0) < we and x.get("end", 0.0) > ws).strip()
+        spk = None
+        if turns and _diar is not None:
+            try:
+                spk = _diar.dominant_speaker(turns, ws, we)
+            except Exception:  # noqa: BLE001
+                spk = None
+        v = vision.director(frames, prompt=prompt, transcript=tr, main_speaker=spk)
+        return {"t0": ws, "t1": we, "v": v} if isinstance(v, dict) else None
+
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        verdicts = [r for r in ex.map(one_window, starts) if r]
+    if not verdicts:
+        return [], ""
+
+    def conf(v):
+        try:
+            return float(v.get("confidence", 0.5) or 0.5)
+        except (TypeError, ValueError):
+            return 0.5
+
+    # split-vs-overlay = ONE global confidence-weighted vote (a single flaky probe
+    # must not poison the clip — mirrors the layout classifier's stance); the
+    # fullscreen labels stay per-window (real mid-clip events).
+    split_w = sum(conf(r["v"]) for r in verdicts if r["v"].get("layout") == "split")
+    overlay_w = sum(conf(r["v"]) for r in verdicts if r["v"].get("layout") == "overlay")
+    two_lay = "overlay" if overlay_w > split_w else "split"
+    sides = [r["v"].get("box1_side") for r in verdicts
+             if r["v"].get("box1_side") in ("left", "right")]
+    side_global = max(set(sides), key=sides.count) if sides else None
+    # A split/overlay segment WILL be emitted if any window's RAW layout was
+    # split/overlay — guarantee it a side (default 'left', like the geometric
+    # fallback) so {side}/{other_side} placeholders never leak literally into the
+    # prompt. A pure full/fullcontent clip keeps side_global=None (correct).
+    if side_global is None and any(
+            r["v"].get("layout") in ("split", "overlay") for r in verdicts):
+        side_global = "left"
+
+    def norm_layout(lay):
+        return lay if lay in ("full", "fullcontent") else two_lay
+
+    segs: list = []
+    for r in verdicts:
+        v = r["v"]
+        lay = norm_layout(v.get("layout"))
+        side = side_global if lay in ("split", "overlay") else None
+        moving = bool(v.get("subject_moving"))
+        desc = (v.get("box1_desc") or "").strip()
+        if segs and segs[-1]["layout"] == lay and segs[-1]["side"] == side:
+            segs[-1]["t1"] = r["t1"]
+            segs[-1]["moving"] = segs[-1]["moving"] or moving
+            if not segs[-1]["box1_desc"] and desc:
+                segs[-1]["box1_desc"] = desc
+        else:
+            segs.append({"t0": r["t0"], "t1": r["t1"], "layout": lay, "side": side,
+                         "moving": moving, "box1_desc": desc})
+    # contiguous boundaries with the small LEAD nudge (box switches slightly early)
+    for i in range(1, len(segs)):
+        b = max(segs[i - 1]["t0"] + 0.4, segs[i]["t0"] - _DIR_LEAD)
+        segs[i - 1]["t1"] = b
+        segs[i]["t0"] = b
+    segs[0]["t0"] = t0
+    segs[-1]["t1"] = t1
+    note = "director: " + " · ".join(
+        f"{s['layout']}{('(' + s['side'] + ')') if s['side'] else ''} "
+        f"{s['t0']:.1f}–{s['t1']:.1f}s{' [pan]' if s['moving'] else ''}"
+        for s in segs)
+    return segs, note
+
+
 def predict_track(
     source_path: Path,
     prompt: str,
@@ -1181,6 +1386,9 @@ def predict_track(
     lock_size: bool = True,
     role: Optional[str] = None,
     segments: Optional[list] = None,
+    use_director: bool = False,
+    words: Optional[list] = None,
+    turns: Optional[list] = None,
 ) -> dict:
     """Predict a box track over [t_start, t_end]. Returns
     {keyframes, sampled, detected, width, height, segments}. With `lock_size`
@@ -1220,19 +1428,40 @@ def predict_track(
     # the geometric probe beats asking "left or right?" which flips when the
     # content also shows people talking to camera).
     has_ph = any(tok in prompt for tok in ("{side}", "{other_side}", "{layout}"))
+    director_note = ""
     if segments is not None:
         # caller supplies a shared, precomputed timeline (one probe pass for
-        # both boxes) — copy it: detection feedback below mutates boundaries
+        # both boxes — e.g. the batch director runs once for both) — copy it:
+        # detection feedback below mutates boundaries
         segments = [dict(s) for s in segments]
-    elif has_ph:
-        segments = _detect_layout_segments(source_path, t0, t1, w, h,
-                                           min_gap=step)
-        if not segments:
-            s = _resolve_side(source_path, times, w, h)
-            segments = [{"t0": t0, "t1": t1, "layout": "split", "side": s}]
     else:
-        segments = [{"t0": t0, "t1": t1, "layout": None, "side": None}]
-    seg_prompts = [_fill_placeholders(prompt, s["layout"], s["side"]) for s in segments]
+        if use_director and vision.enabled():
+            # interactive path: run the windowed director here (the batch path
+            # runs it once upstream and passes segments=)
+            segments, director_note = run_director(source_path, t0, t1, w, h,
+                                                   prompt, words=words, turns=turns)
+        else:
+            segments = []
+        if not segments:        # director off / produced nothing → geometric path
+            if has_ph:
+                segments = _detect_layout_segments(source_path, t0, t1, w, h,
+                                                   min_gap=step)
+                if not segments:
+                    s = _resolve_side(source_path, times, w, h)
+                    segments = [{"t0": t0, "t1": t1, "layout": "split", "side": s}]
+            else:
+                segments = [{"t0": t0, "t1": t1, "layout": None, "side": None}]
+    # box1_desc (the director's WHO/WHAT for box1) is appended to box1's prompt
+    # only — never box2 (role='content'). The PLAIN (layout-only) prompts are used
+    # by the boundary-correction redetect so it never applies the wrong person's
+    # identity to boundary frames.
+    seg_prompts_plain = [_fill_placeholders(prompt, s["layout"], s["side"]) for s in segments]
+    seg_prompts = list(seg_prompts_plain)
+    if role != "content":
+        for i, s in enumerate(segments):
+            desc = (s.get("box1_desc") or "").strip()
+            if desc:
+                seg_prompts[i] = (seg_prompts[i] + ". Focus on " + desc).strip()
 
     def seg_idx_of(t: float) -> int:
         for i in range(len(segments) - 1, -1, -1):
@@ -1245,7 +1474,8 @@ def predict_track(
         call: whichever of streamer/content fills the screen IS the whole
         frame, the other box is a gap. Returns (handled, detection_or_None)."""
         lay = segments[seg_i]["layout"]
-        if lay in ("full", "fullcontent") and role in ("streamer", "content"):
+        if (lay in ("full", "fullcontent") and role in ("streamer", "content")
+                and not segments[seg_i].get("moving")):
             owner = "streamer" if lay == "full" else "content"
             det = {"x": 0.0, "y": 0.0, "w": float(w), "h": float(h)} if role == owner else None
             return True, det
@@ -1320,7 +1550,8 @@ def predict_track(
             if handled:
                 return det
             b64 = _extract_frame_b64(source_path, t)
-            return vision.detect_box(b64, seg_prompts[seg_i], w, h) if b64 else None
+            # layout-only prompt (no director box1_desc) for boundary feedback
+            return vision.detect_box(b64, seg_prompts_plain[seg_i], w, h) if b64 else None
 
         for i in range(len(segments) - 1):
             seg_times = [t for t, _ in results
@@ -1380,7 +1611,8 @@ def predict_track(
         seg_results = [(t, b) for t, b in results if seg_idx_of(t) == i]
         if not seg_results:
             continue
-        kfs, rd = _track_segment(seg_results, w, h, padding, smooth, lock_size)
+        kfs, rd, _dyn = _track_segment(seg_results, w, h, padding, smooth,
+                                       lock_size, subject_moving=seg.get("moving"))
         detected += rd
         if kfs:
             kfs[0]["t"] = round(max(t0, seg["t0"]), 3)
@@ -1405,8 +1637,11 @@ def predict_track(
         fit_default = "cover" if role == "streamer" else "blur_pad"
         for k in keyframes:
             if not k.get("gap"):
-                k["interp"] = "hold"
                 k["fit"] = fit_default
+                # a moving (panning) track keeps its linear interp — forcing hold
+                # would step the pan; only static boxes get the hold default.
+                if not k.get("moving"):
+                    k["interp"] = "hold"
 
     return {
         "keyframes": keyframes,
@@ -1419,4 +1654,5 @@ def predict_track(
         "side": segments[0]["side"],   # first segment's side (None w/o placeholders)
         "segments": [{"t0": round(s["t0"], 2), "t1": round(s["t1"], 2),
                       "layout": s["layout"], "side": s["side"]} for s in segments],
+        "director_note": director_note,
     }
