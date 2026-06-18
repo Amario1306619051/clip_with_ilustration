@@ -244,7 +244,7 @@ _DIRECTOR_TAIL = (
 
 def director(frames_b64: list, prompt: str = "", context: str = "",
              transcript: str = "", main_speaker: Optional[str] = None,
-             max_tokens: int = 700) -> Optional[dict]:
+             expectation: str = "", max_tokens: int = 700) -> Optional[dict]:
     """Multi-frame 'shot director' for ONE short window: shows K chronological
     frames + the box instruction + (optional) the transcript slice + (optional) a
     dominant-speaker hint, and asks for a STRICT JSON verdict about the window
@@ -264,6 +264,9 @@ def director(frames_b64: list, prompt: str = "", context: str = "",
         head += "CONTEXT: " + context.strip() + "\n"
     if (prompt or "").strip():
         head += "WHAT box1 SHOULD BE: " + prompt.strip() + "\n"
+    if (expectation or "").strip():
+        head += ("DESIRED FINAL 9:16 OUTPUT (choose the layout/box that best "
+                 "achieves this): " + expectation.strip() + "\n")
     if (transcript or "").strip():
         head += ("TRANSCRIPT (what is said in this window — may help pick the "
                  "active speaker): " + transcript.strip()[:600] + "\n")
@@ -291,11 +294,144 @@ def director(frames_b64: list, prompt: str = "", context: str = "",
         return None
 
 
-def detect_box(image_b64: str, prompt: str, frame_w: int, frame_h: int) -> Optional[dict]:
+_FRAMING_TAIL = (
+    "\nThis is ONE final cropped frame from a vertical video. Judge ONLY the framing "
+    "of this crop. Reply with ONLY a compact JSON object — no prose, no markdown:\n"
+    '{"subject_present":true,"head_cut":false,"well_framed":true,"reason":"<=8 words"}\n'
+    "subject_present: is the intended subject actually IN this crop at all?\n"
+    "head_cut: is a person's head/forehead/chin clipped by the top or bottom edge?\n"
+    "well_framed: is the subject reasonably centered and not awkwardly cropped?"
+)
+
+
+def check_framing(image_b64: str, expect: str = "", expectation: str = "") -> Optional[dict]:
+    """Judge ONE final cropped frame: {subject_present, head_cut, well_framed,
+    reason}. Returns None on any failure / unparseable reply — the caller treats
+    None as PASS, so this can only ever make boxing SAFER, never crash a run.
+    enable_thinking=False (reasoning model)."""
+    if not enabled() or not image_b64:
+        return None
+    head = ""
+    if (expectation or "").strip():
+        head += "DESIRED OUTPUT: " + expectation.strip() + "\n"
+    if (expect or "").strip():
+        head += "Expected subject: " + expect.strip() + "\n"
+    try:
+        resp = _client().chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": head + _FRAMING_TAIL},
+                {"type": "image_url",
+                 "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}},
+            ]}],
+            temperature=0,
+            max_tokens=120,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        return _parse_json(resp.choices[0].message.content or "")
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("vision.check_framing request failed: %s", e)
+        return None
+
+
+_REVIEW_TAIL = (
+    "\nIMAGE 1 is the ORIGINAL full frame (context — the footage that is available). "
+    "The REMAINING images are the 9:16 CROP PREVIEW the viewer would actually see, at "
+    "several CONSECUTIVE moments across this ONE shot (top part = box1's crop, bottom "
+    "part = box2's crop; a fully BLACK part means that box is empty here — that is "
+    "FINE and intentional, do NOT try to fill it). Judge the framing ACROSS all the "
+    "preview moments (a subject drifts as they move — care about the whole shot, not "
+    "one instant).\n"
+    "You are the DIRECTOR reviewing your crew's work. For EACH box decide ONE command "
+    "so the preview better matches the DESIRED OUTPUT. Reply with ONLY a compact JSON "
+    "object — no prose, no markdown:\n"
+    '{"box1":{"agent":"editor","action":"blur","reason":"<=6 words"},'
+    '"box2":{"agent":"none","action":"keep","reason":""}}\n'
+    "Allowed (agent, action):\n"
+    "- (editor, keep)     : box already good\n"
+    "- (editor, blur)     : a head/subject is CLIPPED by an edge — show the whole crop padded\n"
+    "- (editor, cover)    : too much empty/blurred margin — fill the slot instead\n"
+    "- (editor, zoom_in)  : subject too small/far inside the crop\n"
+    "- (editor, zoom_out) : subject too tight, edges of the head/body cut\n"
+    "- (editor, up)       : only the TOP of a head is clipped — raise the crop a little\n"
+    "- (cameraman, redetect): this box framed the WRONG person/thing, or the subject "
+    "is badly off-centre/half-cut across the shot\n"
+    "- (none, keep)       : this box is empty here on purpose (black) — leave it\n"
+    "Be conservative: prefer keep unless something is clearly wrong across the shot. "
+    "NEVER ask to delete or empty a box that currently shows content."
+)
+
+
+def review_shot(orig_b64: str, preview_b64s, expect: str = "",
+                box1_desc: str = "", box2_desc: str = "",
+                transcript: str = "", main_speaker: Optional[str] = None,
+                max_tokens: int = 320) -> Optional[dict]:
+    """DIRECTOR review of the actual CROP PREVIEW vs the desired output, shown a SHORT
+    SEQUENCE of preview frames across one shot (like the main director sees a window —
+    motion matters, not one instant) plus one original frame for context. `preview_b64s`
+    may be a single b64 string or a list. Returns a per-box command for the crew:
+    {"box1":{agent,action,reason}, "box2":{...}}. agent in {editor,cameraman,none};
+    action per _REVIEW_TAIL. Returns the parsed dict or None on any failure (caller
+    treats None / missing box as 'keep', so review can only ever make framing better,
+    never crash or empty a box). enable_thinking=False (reasoning model)."""
+    if isinstance(preview_b64s, str):
+        preview_b64s = [preview_b64s]
+    preview_b64s = [p for p in (preview_b64s or []) if p]
+    if len(preview_b64s) > 4:   # bound the image count (orig + <=4 previews) regardless of caller
+        n = len(preview_b64s)
+        preview_b64s = [preview_b64s[round(i * (n - 1) / 3)] for i in range(4)]
+    if not enabled() or not orig_b64 or not preview_b64s:
+        return None
+    head = ""
+    if (expect or "").strip():
+        head += "DESIRED OUTPUT: " + expect.strip() + "\n"
+    if (box1_desc or "").strip():
+        head += "box1 SHOULD BE: " + box1_desc.strip() + "\n"
+    if (box2_desc or "").strip():
+        head += "box2 SHOULD BE: " + box2_desc.strip() + "\n"
+    if (transcript or "").strip():
+        head += ("SAID IN THIS SHOT (helps judge whether the RIGHT subject is framed): "
+                 + transcript.strip()[:600] + "\n")
+    if main_speaker:
+        head += ("AUDIO HINT: the dominant speaker here is labelled " + str(main_speaker)
+                 + " (a diarization label, not a name — box1 should usually be whoever "
+                 "is speaking).\n")
+    content = [
+        {"type": "text", "text": head + _REVIEW_TAIL},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{orig_b64}"}},
+    ]
+    for p in preview_b64s:
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{p}"}})
+    try:
+        resp = _client().chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": content}],
+            temperature=0,
+            max_tokens=max_tokens,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        return _parse_json(resp.choices[0].message.content or "")
+    except Exception as e:  # noqa: BLE001 — best-effort, never aborts a run
+        log.warning("vision.review_shot request failed: %s", e)
+        return None
+
+
+def detect_box(image_b64: str, prompt: str, frame_w: int, frame_h: int,
+               max_area_frac: float = 1.0, min_area_frac: float = 0.0,
+               max_aspect: float = float("inf")) -> Optional[dict]:
     """Return {x,y,w,h} in SOURCE PIXELS for the prompted subject, or None when the
     model finds nothing. frame_w/frame_h are the SOURCE dimensions (the image may
     have been downscaled — normalized coords are scale-free). Picks the
-    largest-area box when several are returned."""
+    largest-area box when several are returned.
+
+    PLAUSIBILITY GATE (defaults fully DISABLED so every caller is byte-identical):
+    when opted in, a candidate is dropped if it fills more than `max_area_frac` of
+    the frame, is thinner than `min_area_frac`, or its aspect exceeds `max_aspect`
+    — for a SUBJECT prompt a near-whole-frame / extreme-strip box is a
+    mis-detection, and dropping it (→ None) lets the normal miss/bridge/gap
+    machinery take over. The layout/side probes leave the gate open (they DEPEND on
+    huge boxes), so the defaults must stay permissive."""
     if not enabled():
         return None
     q = (prompt or "the main subject").strip()
@@ -319,15 +455,31 @@ def detect_box(image_b64: str, prompt: str, frame_w: int, frame_h: int) -> Optio
     boxes = _parse_boxes(text)
     if not boxes:
         return None
-    # Largest-area box (in normalized units) = the main subject, not background.
-    x1, y1, x2, y2 = max(boxes, key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
-
-    # 0-1000 normalized → source pixels, per-axis (aspect-independent), clamped.
-    px1 = max(0.0, min(x1 / 1000.0 * frame_w, frame_w))
-    px2 = max(0.0, min(x2 / 1000.0 * frame_w, frame_w))
-    py1 = max(0.0, min(y1 / 1000.0 * frame_h, frame_h))
-    py2 = max(0.0, min(y2 / 1000.0 * frame_h, frame_h))
-    w, h = px2 - px1, py2 - py1
-    if w < 2 or h < 2:
+    # 0-1000 normalized → source pixels per-axis (aspect computed in PIXELS, not the
+    # square normalized space), clamped; then apply the plausibility gate.
+    all_cands, gated = [], []
+    for x1, y1, x2, y2 in boxes:
+        px1 = max(0.0, min(x1 / 1000.0 * frame_w, frame_w))
+        px2 = max(0.0, min(x2 / 1000.0 * frame_w, frame_w))
+        py1 = max(0.0, min(y1 / 1000.0 * frame_h, frame_h))
+        py2 = max(0.0, min(y2 / 1000.0 * frame_h, frame_h))
+        bw, bh = px2 - px1, py2 - py1
+        if bw < 2 or bh < 2:
+            continue
+        box = {"x": px1, "y": py1, "w": bw, "h": bh}
+        all_cands.append(box)
+        area_frac = (bw * bh) / float(frame_w * frame_h)
+        aspect = max(bw / bh, bh / bw)
+        if area_frac > max_area_frac or aspect > max_aspect:
+            continue
+        if min_area_frac > 0 and area_frac < min_area_frac:
+            continue
+        gated.append(box)
+    # Prefer gate survivors, but FALL BACK to the largest valid box when the gate
+    # would empty the result — a legitimately sustained full-frame close-up must
+    # still box (it renders fine); a LONE whole-screen outlier among normal frames
+    # is then dropped by _reject_outliers downstream, not turned into a black slot.
+    survivors = gated or all_cands
+    if not survivors:
         return None
-    return {"x": px1, "y": py1, "w": w, "h": h}
+    return max(survivors, key=lambda b: b["w"] * b["h"])

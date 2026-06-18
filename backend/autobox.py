@@ -26,6 +26,12 @@ log = logging.getLogger(__name__)
 MAX_FRAMES = 80      # hard cap on vision calls per request (bounds cost/latency)
 MAX_WORKERS = 4      # endpoint sweet spot (study: 4 clean, up to 6 ok, then queues)
 SEND_MAX_W = 1280    # downscale frames sent to the model (coords are scale-free)
+# Plausibility gate for SUBJECT tracking (not the layout/side probes, which need
+# huge boxes): drop a detection that fills >92% of the frame or is an extreme
+# strip (aspect > 6) — a mis-detection for a person/subject prompt. → None → the
+# normal miss/bridge/gap machinery handles it.
+_GATE_MAX_AREA = 0.92
+_GATE_MAX_ASPECT = 6.0
 
 
 def _probe(path: Path) -> tuple:
@@ -67,6 +73,142 @@ def _extract_frame_b64(src: Path, t: float) -> Optional[str]:
             pass
 
 
+def _render_final_crop_b64(src: Path, t: float, box: dict, slot_w: int, slot_h: int) -> Optional[str]:
+    """Render the FINAL cover-cropped SLOT image at time t (full-res, base64 JPEG)
+    exactly as the renderer would: crop the source box, scale-cover to the slot,
+    center-crop. Used by verify_framing to judge the REAL on-screen framing (NOT a
+    downscaled probe — head-cut must be read on real pixels)."""
+    cx, cy = int(max(0, round(box["x"]))), int(max(0, round(box["y"])))
+    cw, ch = int(max(2, round(box["w"]))), int(max(2, round(box["h"])))
+    fd, tmp = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    try:
+        vf = (f"crop={cw}:{ch}:{cx}:{cy},"
+              f"scale={slot_w}:{slot_h}:force_original_aspect_ratio=increase,"
+              f"crop={slot_w}:{slot_h}")
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-ss", f"{t:.3f}", "-i", str(src), "-frames:v", "1",
+               "-vf", vf, "-q:v", "4", tmp]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.getsize(tmp):
+            return None
+        return base64.b64encode(Path(tmp).read_bytes()).decode()
+    except Exception as e:  # noqa: BLE001
+        log.warning("final-crop render @%.2fs failed: %s", t, e)
+        return None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
+def _box_at(kfs: list, t: float) -> Optional[dict]:
+    """The {x,y,w,h} a box occupies at time t (hold/linear interp), or None when the
+    segment containing t is a gap/empty. Used to composite the review preview."""
+    if not kfs:
+        return None
+    ks = sorted(kfs, key=lambda k: k.get("t", 0.0))
+
+    def xywh(k):
+        if k.get("gap"):
+            return None
+        d = {q: float(k[q]) for q in ("x", "y", "w", "h")}
+        d["fit"] = k.get("fit", "cover")
+        return d
+
+    if t <= ks[0].get("t", 0.0):
+        return xywh(ks[0])
+    for a, b in zip(ks, ks[1:]):
+        if a["t"] <= t < b["t"]:
+            if a.get("gap"):
+                return None
+            if a.get("interp") == "linear" and not b.get("gap") and b["t"] > a["t"]:
+                f = (t - a["t"]) / (b["t"] - a["t"])
+                d = {q: float(a[q]) + (float(b[q]) - float(a[q])) * f
+                     for q in ("x", "y", "w", "h")}
+                d["fit"] = a.get("fit", "cover")
+                return d
+            return xywh(a)
+    return xywh(ks[-1])
+
+
+def _composite_preview_b64(src: Path, t: float, b1: Optional[dict],
+                           b2: Optional[dict]) -> Optional[str]:
+    """Build the 9:16 CROP PREVIEW at time t exactly as the renderer composes it:
+    both boxes present → box1 cover-cropped into the top 1080x720 slot stacked over
+    box2 in the bottom 1080x1200; one box only → it fills the whole 1080x1920
+    (single-box full mode); neither → black. Returns base64 JPEG (what the director
+    review sees) or None on failure. Cover-fit is used deliberately — it reveals any
+    clipping, which is exactly what the director must judge (blur vs cover etc.)."""
+    from PIL import Image
+    import io
+
+    def slot(box, sw, sh):
+        if not box:
+            return Image.new("RGB", (sw, sh), (0, 0, 0))
+        bb = (_render_blur_crop_b64(src, t, box, sw, sh)
+              if box.get("fit") == "blur_pad"
+              else _render_final_crop_b64(src, t, box, sw, sh))
+        if not bb:
+            return Image.new("RGB", (sw, sh), (0, 0, 0))
+        try:
+            im = Image.open(io.BytesIO(base64.b64decode(bb))).convert("RGB")
+            return im if im.size == (sw, sh) else im.resize((sw, sh))
+        except Exception:  # noqa: BLE001
+            return Image.new("RGB", (sw, sh), (0, 0, 0))
+
+    try:
+        if b1 and b2:
+            canvas = Image.new("RGB", (_OUT_W, _OUT_FULL_H), (0, 0, 0))
+            canvas.paste(slot(b1, _OUT_W, _TOP_H), (0, 0))
+            canvas.paste(slot(b2, _OUT_W, _BOT_H), (0, _TOP_H))
+        elif b1:
+            canvas = slot(b1, _OUT_W, _OUT_FULL_H)
+        elif b2:
+            canvas = slot(b2, _OUT_W, _OUT_FULL_H)
+        else:
+            return None
+        buf = io.BytesIO()
+        canvas.save(buf, "JPEG", quality=80)
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception as e:  # noqa: BLE001
+        log.warning("composite preview @%.2fs failed: %s", t, e)
+        return None
+
+
+def _render_blur_crop_b64(src: Path, t: float, box: dict, slot_w: int, slot_h: int) -> Optional[str]:
+    """The FINAL blur_pad SLOT image at time t (base64 JPEG), exactly as the renderer
+    composes blur_pad: the whole box scale-CONTAINED over a blurred scale-cover copy
+    of itself. Lets the review preview show what a blur_pad box truly looks like (no
+    clipping) so the director doesn't keep asking to 'blur' an already-blurred box."""
+    cx, cy = int(max(0, round(box["x"]))), int(max(0, round(box["y"])))
+    cw, ch = int(max(2, round(box["w"]))), int(max(2, round(box["h"])))
+    fd, tmp = tempfile.mkstemp(suffix=".jpg")
+    os.close(fd)
+    try:
+        vf = (f"crop={cw}:{ch}:{cx}:{cy},setsar=1,split=2[a][b];"
+              f"[a]scale={slot_w}:{slot_h}:force_original_aspect_ratio=increase,"
+              f"crop={slot_w}:{slot_h},gblur=sigma=30:steps=2,eq=brightness=-0.08[bg];"
+              f"[b]scale={slot_w}:{slot_h}:force_original_aspect_ratio=decrease[fg];"
+              f"[bg][fg]overlay=(W-w)/2:(H-h)/2")
+        cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+               "-ss", f"{t:.3f}", "-i", str(src), "-frames:v", "1",
+               "-filter_complex", vf, "-q:v", "4", tmp]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.getsize(tmp):
+            return None
+        return base64.b64encode(Path(tmp).read_bytes()).decode()
+    except Exception as e:  # noqa: BLE001
+        log.warning("blur-crop render @%.2fs failed: %s", t, e)
+        return None
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def _sample_times(t0: float, t1: float, step: float):
     """Return (times, effective_step, capped). When the range is long enough to
     exceed MAX_FRAMES, the step is widened so coverage stays within the cap —
@@ -93,6 +235,21 @@ def _pad(box: dict, frac: float, w: int, h: int) -> dict:
         "w": min(w - x, box["w"] + 2 * pw),
         "h": min(h - y, box["h"] + 2 * ph),
     }
+
+
+def _headroom(box: dict, frac: float, w: int, h: int) -> dict:
+    """TOP-ONLY expansion: grow the box upward by `frac` of its height so a tight
+    person detection keeps headroom (forehead not clipped), especially at
+    padding=0. Width/x untouched; the bottom edge is unchanged so the growth only
+    adds space above the head. The upward center shift is frac*h/2 — proportional to
+    each box's height, so when sizes are stable (the locked/pinned case) it's a
+    near-uniform offset that adds only a tiny center-y wobble (<< the moving
+    thresholds), and it survives _stabilize_size/_lock_static (they re-center on the
+    raised center)."""
+    grow = box["h"] * frac
+    y = max(0.0, box["y"] - grow)
+    return {"x": box["x"], "y": y, "w": box["w"],
+            "h": min(h - y, box["h"] + (box["y"] - y))}
 
 
 def _build_keyframes(seq: list, w: int, h: int) -> tuple:
@@ -923,6 +1080,64 @@ def debounce_track(kfs: list, min_hold: float = 0.6, w: int = 0, h: int = 0) -> 
     return out
 
 
+def settle_track(kfs: list, w: int, h: int, win: int = 5) -> list:
+    """Final CALM pass. After the geometric snaps (resolve_split_overlap etc.) a
+    box's size/position can FLICKER at layout transitions — e.g. box1 oscillating
+    ~586<->1153 wide every 0.25s where the per-keyframe seam-snap lands
+    inconsistently, which the per-segment size-lock (run earlier) never sees.
+    Median-filter x/y/w/h over `win` within each RUN of consecutive non-gap,
+    non-moving keyframes. Median is edge-preserving: a genuine sustained
+    transition (535->1920) is kept, but lone/short flicker collapses to the local
+    median. Gap kfs (segment boundaries) and moving kfs (a real pan — per-kf
+    motion is intentional) are left untouched and act as run boundaries. Re-clamp
+    + dedupe at the end."""
+    if not kfs or len(kfs) < 3:
+        return kfs
+    out = [dict(k) for k in kfs]
+    keys = ("x", "y", "w", "h")
+    half = max(1, win // 2)
+
+    def _full(k):
+        # a WHOLE-frame box (synth_full's fullscreen owner) — must NEVER be median-
+        # blended toward an adjacent split panel (that re-creates the half-cut-face
+        # bug synth_full fixes). Treat it as a run boundary, like gap/moving.
+        return (not k.get("gap")
+                and k.get("x", 0.0) <= 1.0 and k.get("y", 0.0) <= 1.0
+                and k.get("w", 0.0) >= 0.99 * w and k.get("h", 0.0) >= 0.99 * h)
+
+    def _bound(k):
+        return k.get("gap") or k.get("moving") or _full(k)
+
+    i, n = 0, len(out)
+    while i < n:
+        if _bound(out[i]):
+            i += 1
+            continue
+        j = i
+        while j < n and not _bound(out[j]):
+            j += 1
+        run = out[i:j]                      # same dict refs as out
+        if len(run) >= 3:
+            med = []
+            for idx in range(len(run)):
+                lo, hi = max(0, idx - half), min(len(run), idx + half + 1)
+                m = {}
+                for k in keys:
+                    vals = sorted(run[r][k] for r in range(lo, hi))
+                    nn = len(vals)
+                    m[k] = vals[nn // 2] if nn % 2 else (vals[nn // 2 - 1] + vals[nn // 2]) / 2.0
+                med.append(m)
+            for idx, kf in enumerate(run):    # apply AFTER computing every median
+                m = med[idx]
+                x = max(0.0, min(m["x"], w - 2.0))
+                y = max(0.0, min(m["y"], h - 2.0))
+                kf["x"], kf["y"] = round(x, 1), round(y, 1)
+                kf["w"] = round(max(2.0, min(m["w"], w - x)), 1)
+                kf["h"] = round(max(2.0, min(m["h"], h - y)), 1)
+        i = j
+    return _dedupe_keyframes(out)
+
+
 def _fill_placeholders(prompt: str, layout, side) -> str:
     """Substitute {layout}/{side}/{other_side} for one segment. .replace, never
     .format — user prompts may contain other braces."""
@@ -978,9 +1193,26 @@ def _segment_is_dynamic(dets: list, w: int, h: int) -> bool:
     return False
 
 
+def _segment_is_near_static(dets: list, w: int, h: int, frac: float = 0.03) -> bool:
+    """True when the center BARELY moves (MAD <= ~frac of the frame) — essentially
+    a pinned shot. Used to VETO a director 'subject_moving' only when the geometry
+    is genuinely static (the js05 false-positive), while still trusting the director
+    on a MODERATE pan that _segment_is_dynamic (threshold 0.12, and size-spread)
+    would miss. Too few hits → not near-static (don't veto)."""
+    if len(dets) < 5:
+        return False
+    cxs = sorted(b["x"] + b["w"] / 2.0 for _, b in dets)
+    cys = sorted(b["y"] + b["h"] / 2.0 for _, b in dets)
+    mcx, mcy = cxs[len(cxs) // 2], cys[len(cys) // 2]
+    madx = sorted(abs(c - mcx) for c in cxs)[len(cxs) // 2]
+    mady = sorted(abs(c - mcy) for c in cys)[len(cys) // 2]
+    return madx <= w * frac and mady <= h * frac
+
+
 def _track_segment(results: list, w: int, h: int, padding: float,
                    smooth: bool, lock_size: bool,
-                   subject_moving: Optional[bool] = None):
+                   subject_moving: Optional[bool] = None,
+                   head_room: float = 0.0):
     """The single-layout pipeline (outlier rejection → pad → smooth → size lock →
     static pin → interior bridge → keyframes), applied to ONE segment's samples.
     Returns (keyframes, raw_detected, dynamic).
@@ -999,6 +1231,9 @@ def _track_segment(results: list, w: int, h: int, padding: float,
     det_items = _reject_outliers(det_items)
     if padding and padding > 0:
         det_items = [(t, _pad(b, padding, w, h)) for t, b in det_items]
+    if head_room and head_room > 0:
+        # top-only headroom for the person box; constant offset → can't flip moving
+        det_items = [(t, _headroom(b, head_room, w, h)) for t, b in det_items]
     raw_detected = len(det_items)
     # Decide whether this segment PANS (locked size, center follows — no static
     # pin) instead of pinning to one box. Director override wins; else auto-detect
@@ -1007,7 +1242,12 @@ def _track_segment(results: list, w: int, h: int, padding: float,
     if subject_moving is None:
         moving = bool(lock_size) and _segment_is_dynamic(det_items, w, h)
     else:
-        moving = bool(subject_moving) and bool(lock_size) and raw_detected >= 5
+        # director hint: TRUST it unless the geometry is essentially PINNED — a
+        # static talking-head the director wrongly flagged 'moving' (e.g. js05)
+        # stays static, but a MODERATE director-confirmed pan (below the coarse
+        # _segment_is_dynamic threshold) is still honoured.
+        moving = (bool(subject_moving) and bool(lock_size) and raw_detected >= 5
+                  and not _segment_is_near_static(det_items, w, h))
     if smooth and len(det_items) >= 3:
         det_items = _smooth(det_items)
     pinned = False
@@ -1142,8 +1382,7 @@ def resolve_split_overlap(kfs1: list, kfs2: list, w: int, h: int,
     on the seam — the visible "ngaceo" in a split. For every time both boxes are
     real and overlap as a true left/right split, snap both edges to the shared
     divider. No-op for fullscreen (one box gap), overlay/PiP (containment), or
-    clean splits. Returns (new_kfs1, new_kfs2). (Unused in illustrator's single-
-    box flow; kept in sync with clipper's autobox.)"""
+    clean splits. Returns (new_kfs1, new_kfs2)."""
     if not kfs1 or not kfs2:
         return kfs1, kfs2
     orig1, orig2 = [dict(k) for k in kfs1], [dict(k) for k in kfs2]
@@ -1265,35 +1504,380 @@ def dedupe_same_person(kfs1: list, kfs2: list, overlap_thresh: float = 0.6) -> l
     if not kfs1 or not kfs2:
         return kfs2
 
-    def overlap_ratio(a, b):
+    def iou(a, b):
+        # IoU (intersection / UNION) — high ONLY when the two boxes are similar
+        # size AND position (the actual same-subject-twice case). NOT inter/min,
+        # which hits 1.0 whenever box2 merely sits INSIDE a much larger box1
+        # (a full-frame box1 over a content/2nd-person panel = a legit overlay,
+        # must NOT gap box2). That inter/min bug was dropping box2 on podcasts.
         ix = max(0.0, min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"]))
         iy = max(0.0, min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"]))
         inter = ix * iy
-        m = min(a["w"] * a["h"], b["w"] * b["h"])
-        return inter / m if m > 0 else 0.0
+        union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+        return inter / union if union > 0 else 0.0
 
     out = []
     for k in kfs2:
         k = dict(k)
         if not k.get("gap"):
             o = _active_kf(kfs1, k["t"])
-            if o and not o.get("gap") and overlap_ratio(o, k) > overlap_thresh:
-                k["gap"] = True   # same subject as box1 → box2 empty here
+            if o and not o.get("gap") and iou(o, k) > overlap_thresh:
+                k["gap"] = True   # same subject as box1 (similar box) → box2 empty here
         out.append(k)
     return out
+
+
+# ── Self-verify framing pass ───────────────────────────────────────────────
+_OUT_W, _OUT_FULL_H, _TOP_H, _BOT_H = 1080, 1920, 720, 1200  # locked render layout
+_VERIFY_MAX_FRAMES = 24   # (legacy; the geometric cameraman makes no VLM calls)
+_VERIFY_VCROP_MAX = 0.22  # cover-crop > this fraction of box height → use blur_pad instead
+
+
+def _box_runs(kfs: list):
+    """Maximal runs [i0, i1] of consecutive NON-gap keyframes — one on-screen
+    'segment' between gaps."""
+    runs, i, n = [], 0, len(kfs)
+    while i < n:
+        if kfs[i].get("gap"):
+            i += 1
+            continue
+        j = i
+        while j + 1 < n and not kfs[j + 1].get("gap"):
+            j += 1
+        runs.append((i, j))
+        i = j + 1
+    return runs
+
+
+def verify_framing(source_path: Path, box1: list, box2: list, w: int, h: int,
+                   descs: Optional[dict] = None,
+                   full_focus_when_single: bool = True) -> tuple:
+    """CAMERAMAN fit pass — purely GEOMETRIC, no VLM. (The old VLM judge was
+    unreliable: it over-gapped box2 and rarely caught head-crop.) Per on-screen
+    segment, compute how much a COVER crop into the slot the box renders in would
+    clip off the box HEIGHT; if that exceeds _VERIFY_VCROP_MAX (a portrait person
+    box in the wide top slot → head/chin lost), switch the segment to blur_pad,
+    which CONTAINS the whole box (no crop; blurred bars fill the slot). It ONLY
+    changes `fit` (cover↔blur_pad) — it NEVER gaps or resizes a box, so it can
+    never drop a subject. Reliable + instant. source_path/descs kept for
+    signature compatibility. Returns (box1, box2)."""
+    if not (w and h):
+        return box1, box2
+
+    def other_gap_at(other, t):
+        o = _active_kf(other, t) if other else None
+        return (o is None) or bool(o.get("gap"))
+
+    def is_full(k):
+        return k["x"] <= 1 and k["y"] <= 1 and k["w"] >= 0.99 * w and k["h"] >= 0.99 * h
+
+    def slot_for(boxnum, single):
+        if single and full_focus_when_single:
+            return _OUT_W, _OUT_FULL_H
+        return (_OUT_W, _TOP_H) if boxnum == 1 else (_OUT_W, _BOT_H)
+
+    def cover_vcrop(bw, bh, sw, sh):
+        # fraction of the box HEIGHT a cover-crop would clip off in slot (sw, sh)
+        if bw <= 0 or bh <= 0:
+            return 0.0
+        scaled_h = bh * max(sw / bw, sh / bh)
+        return max(0.0, 1.0 - sh / scaled_h) if scaled_h > sh else 0.0
+
+    def decide(boxnum, kfs, other):
+        if not kfs:
+            return kfs
+        kfs = [dict(k) for k in kfs]
+        for k in kfs:
+            if k.get("gap") or k.get("moving") or is_full(k):
+                continue
+            single = other_gap_at(other, k["t"])
+            sw, sh = slot_for(boxnum, single)
+            if cover_vcrop(k["w"], k["h"], sw, sh) > _VERIFY_VCROP_MAX:
+                k["fit"] = "blur_pad"   # cover would clip the head → contain the box
+        return kfs
+
+    nb1 = decide(1, box1, box2) if box1 else box1
+    nb2 = decide(2, box2, nb1) if box2 else box2
+    return nb1, nb2
+
+
+# ── DIRECTOR review loop (Phase 4): editor + cameraman, revise from preview ──
+_REVIEW_ROUNDS = 2        # max revise rounds per segment (cost cap)
+_ZOOM_IN_F = 0.86         # tighter crop (subject bigger)
+_ZOOM_OUT_F = 1.16        # looser crop (more context)
+_UP_FRAC = 0.10           # raise the crop by this fraction of box height ("up")
+_NEAR_FULL_AREA = 0.80    # box already ~full → zoom_out can't grow → blur instead
+
+
+def _seg_idx(kfs: list, t0: float, t1: float) -> list:
+    return [i for i, k in enumerate(kfs)
+            if t0 - 1e-6 <= float(k.get("t", 0.0)) < t1 - 1e-6]
+
+
+def _resize_center(k: dict, factor: float, w: int, h: int) -> dict:
+    cx = k["x"] + k["w"] / 2.0
+    cy = k["y"] + k["h"] / 2.0
+    nw = min(float(w), max(8.0, k["w"] * factor))
+    nh = min(float(h), max(8.0, k["h"] * factor))
+    nx = min(max(0.0, cx - nw / 2.0), w - nw)
+    ny = min(max(0.0, cy - nh / 2.0), h - nh)
+    return {"x": nx, "y": ny, "w": nw, "h": nh}
+
+
+def _editor_apply(kfs: list, t0: float, t1: float, action: str, w: int, h: int) -> bool:
+    """EDITOR executes ONE bounded visual command on the kfs in [t0,t1). Only ever
+    flips fit or resizes/shifts within the frame — NEVER gaps or deletes a box."""
+    changed = False
+    for i in _seg_idx(kfs, t0, t1):
+        k = kfs[i]
+        if k.get("gap"):
+            continue
+        # a deliberate WHOLE-frame box (synth_full's fullscreen owner) must keep its
+        # geometry — resizing/shifting it re-creates the half-cut bug. Only a fit
+        # change is allowed; "too tight" on a full box → show the whole frame padded.
+        if (k["x"] <= 1.0 and k["y"] <= 1.0 and k["w"] >= 0.99 * w and k["h"] >= 0.99 * h
+                and action in ("zoom_in", "zoom_out", "up")):
+            if action == "zoom_out" and k.get("fit") != "blur_pad":
+                k["fit"] = "blur_pad"; changed = True
+            continue
+        if action == "blur":
+            if k.get("fit") != "blur_pad":
+                k["fit"] = "blur_pad"; changed = True
+        elif action == "cover":
+            if k.get("fit") != "cover":
+                k["fit"] = "cover"; changed = True
+        elif action in ("zoom_in", "zoom_out"):
+            area = (k["w"] * k["h"]) / float(w * h or 1)
+            if action == "zoom_out" and area >= _NEAR_FULL_AREA:
+                if k.get("fit") != "blur_pad":      # can't grow past the frame → show it all
+                    k["fit"] = "blur_pad"; changed = True
+                continue
+            nb = _resize_center(k, _ZOOM_IN_F if action == "zoom_in" else _ZOOM_OUT_F, w, h)
+            if abs(nb["w"] - k["w"]) > 1.0 or abs(nb["h"] - k["h"]) > 1.0:
+                k.update(nb); changed = True
+        elif action == "up":
+            if k["y"] <= 1.0:                       # already at the top → can't raise → blur
+                if k.get("fit") != "blur_pad":
+                    k["fit"] = "blur_pad"; changed = True
+                continue
+            ny = max(0.0, k["y"] - k["h"] * _UP_FRAC)
+            if ny != k["y"]:
+                k["y"] = ny; changed = True
+    return changed
+
+
+def _cameraman_redetect(src: Path, kfs: list, t0: float, t1: float,
+                        prompt: str, w: int, h: int) -> bool:
+    """CAMERAMAN re-frames a box the director flagged as the WRONG subject: re-detect
+    over the segment, size-lock a static box, and replace the segment's kfs with it.
+    Returns False (keeps the old box) if nothing is detected — NEVER gaps."""
+    if not (prompt or "").strip():
+        return False
+    found = []
+    for f in (0.3, 0.5, 0.7):
+        b = _extract_frame_b64(src, t0 + (t1 - t0) * f)
+        if not b:
+            continue
+        d = vision.detect_box(b, prompt, w, h,
+                              max_area_frac=_GATE_MAX_AREA, max_aspect=_GATE_MAX_ASPECT)
+        if d:
+            found.append(d)
+    if not found:
+        return False
+    import statistics as _st
+    mb = {q: float(_st.median([d[q] for d in found])) for q in ("x", "y", "w", "h")}
+    idx = _seg_idx(kfs, t0, t1)
+    real_idx = [i for i in idx if not kfs[i].get("gap")]
+    if not real_idx:
+        # segment is intentionally EMPTY (black) here — the subject is absent, so the
+        # director has no business re-detecting a box into it. Leave the gap.
+        return False
+    # keep the FIRST real kf as the re-detected static box; drop the OTHER real kfs
+    # but PRESERVE interior gap kfs (a gap = subject absent there, which redetect has
+    # no evidence to overturn — deleting it would resurrect black stretches as boxes).
+    target = real_idx[0]
+    kfs[target].update(mb)
+    kfs[target]["gap"] = False
+    kfs[target]["moving"] = False
+    kfs[target]["interp"] = "hold"
+    for i in reversed([i for i in idx if i != target and not kfs[i].get("gap")]):
+        kfs.pop(i)
+    return True
+
+
+def _active_full_kf(kfs: list, t: float) -> Optional[dict]:
+    """A full COPY of the keyframe active at time t, retimed to EXACTLY t (so the
+    owning segment's _seg_idx finds it). For a linear (panning) segment x/y/w/h are
+    INTERPOLATED to t so the pan isn't flattened; gap/fit/interp/moving preserved.
+    None if t precedes every kf. Used to SPLIT a held box at a segment boundary."""
+    if not kfs:
+        return None
+    ks = sorted(kfs, key=lambda k: k.get("t", 0.0))
+    if t < ks[0].get("t", 0.0) - 1e-6:
+        return None
+    cur, nxt = ks[0], None
+    for a, b in zip(ks, list(ks[1:]) + [None]):
+        if a.get("t", 0.0) <= t + 1e-6:
+            cur, nxt = a, b
+        else:
+            break
+    nk = dict(cur)
+    nk["t"] = float(t)
+    if (cur.get("interp") == "linear" and not cur.get("gap")
+            and nxt and not nxt.get("gap")):
+        span = float(nxt["t"]) - float(cur["t"])
+        if span > 1e-6:
+            f = (float(t) - float(cur["t"])) / span
+            for q in ("x", "y", "w", "h"):
+                nk[q] = float(cur[q]) + (float(nxt[q]) - float(cur[q])) * f
+    return nk
+
+
+def _split_at_boundaries(kfs: list, segs: list) -> None:
+    """Insert a kf at every interior segment boundary (carrying the value held there)
+    so each director segment owns at least one kf the editor/cameraman can edit in
+    isolation. The kf is inserted at the EXACT boundary time (matching the t0 passed
+    to _seg_idx). A boundary in a gap stretch inserts a GAP kf (segment stays empty —
+    never materialises a box). In-place; the first segment's t0 is the clip start."""
+    if not kfs or len(segs) < 2:
+        return
+    for s in segs[1:]:
+        t0 = float(s.get("t0", 0.0))
+        if any(abs(float(k.get("t", 0.0)) - t0) < 1e-3 for k in kfs):
+            continue
+        nk = _active_full_kf(kfs, t0)
+        if nk is None:
+            continue
+        kfs.append(nk)
+    kfs.sort(key=lambda k: k.get("t", 0.0))
+
+
+def review_and_revise(source_path: Path, box1: list, box2: list, segs: list,
+                      w: int, h: int, expect: str = "", p1: str = "", p2: str = "",
+                      words: Optional[list] = None, turns: Optional[list] = None,
+                      rounds: int = _REVIEW_ROUNDS) -> tuple:
+    """Phase 4 — the DIRECTOR reviews the actual 9:16 CROP PREVIEW per segment and
+    issues bounded revision commands to the EDITOR (blur/cover/zoom/up) and CAMERAMAN
+    (redetect a wrong subject), looping up to `rounds` times until the shot is good.
+    Mutates copies of box1/box2 and returns (box1, box2, note). No-op (returns inputs)
+    when vision is off or there are no director segments. The editor/cameraman can
+    only ADJUST a box, never gap/delete it — so this can only improve framing."""
+    if not vision.enabled() or not segs or not (w and h):
+        return box1, box2, ""
+    b1 = [dict(k) for k in (box1 or [])]
+    b2 = [dict(k) for k in (box2 or [])]
+    # Give each segment its OWN editable kf(s) so a box held across segments can be
+    # revised in one segment without dragging the others (the held-box editing gap).
+    _split_at_boundaries(b1, segs)
+    _split_at_boundaries(b2, segs)
+    words = words or []
+    turns = turns or []
+    try:
+        import diarize as _diar          # pure-python dominant_speaker (no pyannote)
+    except Exception:  # noqa: BLE001
+        _diar = None
+    acts: list = []
+
+    def sample_times(t0, t1):
+        span = t1 - t0
+        fr = [0.2, 0.5, 0.8] if span >= 1.2 else ([0.33, 0.66] if span >= 0.6 else [0.5])
+        return [round(t0 + span * f, 3) for f in fr]
+
+    def composite_at(tm):
+        a1 = _box_at(b1, tm); a2 = _box_at(b2, tm)
+        if not a1 and not a2:
+            return None
+        return _composite_preview_b64(source_path, tm, a1, a2)
+
+    for seg in segs:
+        t0 = float(seg.get("t0", 0.0)); t1 = float(seg.get("t1", t0 + 1.0))
+        if t1 - t0 < 0.4:
+            continue
+        desc = (seg.get("box1_desc") or p1 or "").strip()
+        mid = round((t0 + t1) / 2.0, 3)
+        # SOUND access for the review director: what is SAID in this shot + who is
+        # speaking (so it can judge whether the RIGHT subject is framed, not just the
+        # geometry). transcript = active; speaker = needs diarization (HF-gated).
+        tr = " ".join(x.get("word", "") for x in words
+                      if x.get("start", 0.0) < t1 and x.get("end", 0.0) > t0).strip()
+        spk = None
+        if turns and _diar is not None:
+            try:
+                spk = _diar.dominant_speaker(turns, t0, t1)
+            except Exception:  # noqa: BLE001
+                spk = None
+        orig = _extract_frame_b64(source_path, mid)   # context frame: once per segment
+        if not orig:
+            continue
+        acted: set = set()   # (bx, action-class) already applied here — no flip-flop
+        for _rnd in range(max(1, rounds)):
+            times = sample_times(t0, t1)
+            # build the SEQUENCE of crop previews across the shot (one review call
+            # sees motion, like the main director's window — not one noisy frame)
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+                previews = [p for p in ex.map(composite_at, times) if p]
+            if not previews:
+                break
+            v = vision.review_shot(orig, previews, expect=expect,
+                                   box1_desc=desc, box2_desc=(p2 or ""),
+                                   transcript=tr, main_speaker=spk)
+            if not isinstance(v, dict):
+                break
+            changed = False
+            for bx, kfs in ((1, b1), (2, b2)):
+                # only revise a box that actually OWNS a real kf in THIS segment
+                # (not one merely clamped in from before t0 / after t1)
+                if not any(not kfs[i].get("gap") for i in _seg_idx(kfs, t0, t1)):
+                    continue
+                cmd = v.get(f"box{bx}")
+                if not isinstance(cmd, dict):
+                    continue
+                act = (cmd.get("action") or "keep").strip().lower()
+                agent = (cmd.get("agent") or "").strip().lower()
+                if act in ("keep", ""):
+                    continue
+                cls = ("zoom" if act in ("zoom_in", "zoom_out")
+                       else "fit" if act in ("blur", "cover") else act)
+                if (bx, cls) in acted:
+                    continue   # already applied this class on this box → no oscillation
+                prompt = (desc or p1) if bx == 1 else p2
+                if agent == "cameraman" or act == "redetect":
+                    if _cameraman_redetect(source_path, kfs, t0, t1, prompt, w, h):
+                        changed = True; acted.add((bx, "redetect"))
+                        acts.append(f"{mid:.0f}s b{bx}:redetect")
+                elif _editor_apply(kfs, t0, t1, act, w, h):
+                    changed = True; acted.add((bx, cls))
+                    acts.append(f"{mid:.0f}s b{bx}:{act}")
+            if not changed:
+                break
+    # collapse any boundary kfs we inserted but never edited (identical neighbours)
+    b1 = _dedupe_keyframes(b1)
+    b2 = _dedupe_keyframes(b2)
+    # HARD INVARIANT safety net: a box that HAD real content must never come out
+    # empty/all-gap. If it somehow did, revert that box to its pre-review input.
+    def _has_real(kk):
+        return any(not k.get("gap") for k in (kk or []))
+    if _has_real(box1) and not _has_real(b1):
+        b1 = [dict(k) for k in box1]; acts.append("b1:reverted")
+    if _has_real(box2) and not _has_real(b2):
+        b2 = [dict(k) for k in box2]; acts.append("b2:reverted")
+    note = ("review: " + " · ".join(acts[:8])) if acts else "review: no changes"
+    return b1, b2, note
 
 
 # ── Windowed shot-director pre-pass (Phase 2) ──────────────────────────────
 _DIR_WIN = 2.5         # director window width (s)
 _DIR_STEP = 1.0        # director window hop (s)
 _DIR_FRAMES = 5        # frames shown to the director per window
-_DIR_LEAD = 0.3        # nudge a boundary slightly earlier (mirrors layout segments)
+_DIR_LEAD = 0.3        # DEPRECATED — boundaries are now CENTRED on the change, not nudged early
 _DIR_MAX_WINDOWS = 48  # cost cap: widen the hop on long clips
+_DIR_MIN_SEG = 1.5     # merge segments shorter than this (kills full<->split flicker)
+_DIR_SIDE_MIN_WINDOWS = 1  # consecutive opposite-side windows before box1 flips side (debounce)
 
 
 def run_director(source_path: Path, t0: float, t1: float, w: int, h: int,
                  prompt: str, words: Optional[list] = None,
-                 turns: Optional[list] = None) -> tuple:
+                 turns: Optional[list] = None, expect: str = "") -> tuple:
     """Phase 2 'shot director' pre-pass. Slide a ~2.5s window over [t0,t1]; per
     window show vision.director() K frames + the transcript slice + the dominant
     speaker (from diarization `turns`, if any), then reconcile the per-window
@@ -1343,7 +1927,8 @@ def run_director(source_path: Path, t0: float, t1: float, w: int, h: int,
                 spk = _diar.dominant_speaker(turns, ws, we)
             except Exception:  # noqa: BLE001
                 spk = None
-        v = vision.director(frames, prompt=prompt, transcript=tr, main_speaker=spk)
+        v = vision.director(frames, prompt=prompt, transcript=tr, main_speaker=spk,
+                            expectation=expect)
         return {"t0": ws, "t1": we, "v": v} if isinstance(v, dict) else None
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
@@ -1358,43 +1943,98 @@ def run_director(source_path: Path, t0: float, t1: float, w: int, h: int,
             return 0.5
 
     # split-vs-overlay = ONE global confidence-weighted vote (a single flaky probe
-    # must not poison the clip — mirrors the layout classifier's stance); the
-    # fullscreen labels stay per-window (real mid-clip events).
+    # must not poison the clip); fullscreen labels stay per-window (real events).
     split_w = sum(conf(r["v"]) for r in verdicts if r["v"].get("layout") == "split")
     overlay_w = sum(conf(r["v"]) for r in verdicts if r["v"].get("layout") == "overlay")
     two_lay = "overlay" if overlay_w > split_w else "split"
-    sides = [r["v"].get("box1_side") for r in verdicts
-             if r["v"].get("box1_side") in ("left", "right")]
-    side_global = max(set(sides), key=sides.count) if sides else None
-    # A split/overlay segment WILL be emitted if any window's RAW layout was
-    # split/overlay — guarantee it a side (default 'left', like the geometric
-    # fallback) so {side}/{other_side} placeholders never leak literally into the
-    # prompt. A pure full/fullcontent clip keeps side_global=None (correct).
-    if side_global is None and any(
-            r["v"].get("layout") in ("split", "overlay") for r in verdicts):
-        side_global = "left"
 
     def norm_layout(lay):
         return lay if lay in ("full", "fullcontent") else two_lay
 
+    # PER-WINDOW box1_side with DEBOUNCE: box1 FOLLOWS whoever is speaking in a
+    # 2-shot, but a side flip commits only after _DIR_SIDE_MIN_WINDOWS consecutive
+    # opposite windows (so it doesn't flicker every ~1s). None/'screen' windows
+    # inherit the current side. Seed from the global majority, else 'left' (a
+    # split/overlay segment always needs a concrete side so {side}/{other_side}
+    # never leak literally into the prompt).
+    raw_sides = [r["v"].get("box1_side") if r["v"].get("box1_side") in ("left", "right")
+                 else None for r in verdicts]
+    decisive = [s for s in raw_sides if s]
+    cur_side = max(set(decisive), key=decisive.count) if decisive else "left"
+    stable_sides, pend = [], 0
+    for s in raw_sides:
+        if s and s != cur_side:
+            pend += 1
+            if pend >= _DIR_SIDE_MIN_WINDOWS:
+                cur_side, pend = s, 0
+        elif s == cur_side:
+            pend = 0
+        stable_sides.append(cur_side)
+
+    # Build segments: merge consecutive windows on (layout, side). subject_moving is
+    # a CONFIDENCE-WEIGHTED vote accumulated across the segment's windows (mov_w /
+    # tot_w), NOT an OR of any one window — one eager window must not flag the whole
+    # segment as panning. box1_desc follows the speaker per-segment (first non-empty).
     segs: list = []
-    for r in verdicts:
+    for r, st_side in zip(verdicts, stable_sides):
         v = r["v"]
         lay = norm_layout(v.get("layout"))
-        side = side_global if lay in ("split", "overlay") else None
-        moving = bool(v.get("subject_moving"))
+        side = st_side if lay in ("split", "overlay") else None
         desc = (v.get("box1_desc") or "").strip()
+        c = conf(v)
+        mov = c if v.get("subject_moving") else 0.0
         if segs and segs[-1]["layout"] == lay and segs[-1]["side"] == side:
             segs[-1]["t1"] = r["t1"]
-            segs[-1]["moving"] = segs[-1]["moving"] or moving
+            segs[-1]["_mov"] += mov
+            segs[-1]["_tot"] += c
             if not segs[-1]["box1_desc"] and desc:
                 segs[-1]["box1_desc"] = desc
         else:
             segs.append({"t0": r["t0"], "t1": r["t1"], "layout": lay, "side": side,
-                         "moving": moving, "box1_desc": desc})
-    # contiguous boundaries with the small LEAD nudge (box switches slightly early)
+                         "box1_desc": desc, "_mov": mov, "_tot": c})
+
+    # MIN-SEGMENT-DURATION merge: collapse <_DIR_MIN_SEG flicker (e.g. a 1s split
+    # blip between two full shots) into its larger-duration neighbour, which absorbs
+    # the span + the moving vote and keeps its own layout/side/desc. Duration is
+    # GAP-TO-NEXT (segs[i+1].t0 - segs[i].t0), NOT t1-t0 (every single-window seg has
+    # t1-t0 == _DIR_WIN so t1-t0 would never trip).
+    def _dur(i):
+        return (segs[i + 1]["t0"] - segs[i]["t0"]) if i + 1 < len(segs) \
+            else (segs[i]["t1"] - segs[i]["t0"])
+    while len(segs) > 1:
+        short = [i for i in range(len(segs)) if _dur(i) < _DIR_MIN_SEG]
+        if not short:
+            break
+        i = min(short, key=_dur)
+        cands = [j for j in (i - 1, i + 1) if 0 <= j < len(segs)]
+        nb = max(cands, key=lambda j: (_dur(j),
+                 int(segs[j]["layout"] == segs[i]["layout"] and segs[j]["side"] == segs[i]["side"])))
+        keep, drop = segs[nb], segs[i]
+        keep["t0"] = min(keep["t0"], drop["t0"])
+        keep["t1"] = max(keep["t1"], drop["t1"])
+        keep["_mov"] += drop["_mov"]
+        keep["_tot"] += drop["_tot"]
+        segs.pop(i)
+
+    # finalize the moving flag by majority of the (merged) window mass, drop scratch
+    for s in segs:
+        s["moving"] = (s["_mov"] > 0.5 * s["_tot"]) if s["_tot"] > 0 else False
+        s.pop("_mov", None)
+        s.pop("_tot", None)
+
+    # CONTIGUOUS boundaries placed at the CHANGE, not the window start. Each window
+    # votes ONE label over its whole forward-looking [ws, ws+_DIR_WIN] span, so it
+    # flips to the NEW state as soon as NEW dominates that span — i.e. the real cut
+    # is ~(_DIR_WIN-hop)/2 AFTER the first NEW window's start, not before it. The old
+    # `- _DIR_LEAD` nudge made the box switch ~1s too EARLY (owner: "belum waktunya
+    # tapi bbox udah keganti duluan"). So push each boundary FORWARD by that centring
+    # offset, clamped to leave >=0.4s on both sides.
+    off = max(0.0, _DIR_WIN / 2.0 - hop / 2.0)
     for i in range(1, len(segs)):
-        b = max(segs[i - 1]["t0"] + 0.4, segs[i]["t0"] - _DIR_LEAD)
+        lo = segs[i - 1]["t0"] + 0.4
+        hi = segs[i]["t1"] - 0.4
+        b = segs[i]["t0"] + off
+        b = max(lo, min(b, hi)) if hi > lo else lo
         segs[i - 1]["t1"] = b
         segs[i]["t0"] = b
     segs[0]["t0"] = t0
@@ -1420,6 +2060,8 @@ def predict_track(
     use_director: bool = False,
     words: Optional[list] = None,
     turns: Optional[list] = None,
+    head_room: float = 0.0,
+    expect: str = "",
 ) -> dict:
     """Predict a box track over [t_start, t_end]. Returns
     {keyframes, sampled, detected, width, height, segments}. With `lock_size`
@@ -1470,7 +2112,8 @@ def predict_track(
             # interactive path: run the windowed director here (the batch path
             # runs it once upstream and passes segments=)
             segments, director_note = run_director(source_path, t0, t1, w, h,
-                                                   prompt, words=words, turns=turns)
+                                                   prompt, words=words, turns=turns,
+                                                   expect=expect)
         else:
             segments = []
         if not segments:        # director off / produced nothing → geometric path
@@ -1505,8 +2148,12 @@ def predict_track(
         call: whichever of streamer/content fills the screen IS the whole
         frame, the other box is a gap. Returns (handled, detection_or_None)."""
         lay = segments[seg_i]["layout"]
-        if (lay in ("full", "fullcontent") and role in ("streamer", "content")
-                and not segments[seg_i].get("moving")):
+        if lay in ("full", "fullcontent") and role in ("streamer", "content"):
+            # A fullscreen subject IS the whole frame even if the director flagged
+            # it 'moving' — you cannot pan a box that already spans the frame, and
+            # leaving it to detect_box yields a stale partial box (the streamer's
+            # split panel reused full-screen → half-cut face). owner → whole frame,
+            # the other box → gap.
             owner = "streamer" if lay == "full" else "content"
             det = {"x": 0.0, "y": 0.0, "w": float(w), "h": float(h)} if role == owner else None
             return True, det
@@ -1519,7 +2166,8 @@ def predict_track(
         b64 = _extract_frame_b64(source_path, t)
         if not b64:
             return (t, None)
-        return (t, vision.detect_box(b64, seg_prompts[seg_idx_of(t)], w, h))
+        return (t, vision.detect_box(b64, seg_prompts[seg_idx_of(t)], w, h,
+                                     max_area_frac=_GATE_MAX_AREA, max_aspect=_GATE_MAX_ASPECT))
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         results = list(ex.map(work, times))
@@ -1582,7 +2230,9 @@ def predict_track(
                 return det
             b64 = _extract_frame_b64(source_path, t)
             # layout-only prompt (no director box1_desc) for boundary feedback
-            return vision.detect_box(b64, seg_prompts_plain[seg_i], w, h) if b64 else None
+            return vision.detect_box(b64, seg_prompts_plain[seg_i], w, h,
+                                     max_area_frac=_GATE_MAX_AREA,
+                                     max_aspect=_GATE_MAX_ASPECT) if b64 else None
 
         for i in range(len(segments) - 1):
             seg_times = [t for t, _ in results
@@ -1643,7 +2293,8 @@ def predict_track(
         if not seg_results:
             continue
         kfs, rd, _dyn = _track_segment(seg_results, w, h, padding, smooth,
-                                       lock_size, subject_moving=seg.get("moving"))
+                                       lock_size, subject_moving=seg.get("moving"),
+                                       head_room=(head_room if role in ("streamer", None) else 0.0))
         detected += rd
         if kfs:
             kfs[0]["t"] = round(max(t0, seg["t0"]), 3)
@@ -1673,6 +2324,11 @@ def predict_track(
                 # would step the pan; only static boxes get the hold default.
                 if not k.get("moving"):
                     k["interp"] = "hold"
+
+    # Final calm pass: median-filter size/position so transition flicker collapses
+    # (interactive single-box path; the batch 2-box path settles again after its
+    # geometric snaps, which is where the worst flicker is introduced).
+    keyframes = settle_track(keyframes, w, h)
 
     return {
         "keyframes": keyframes,

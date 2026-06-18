@@ -324,6 +324,40 @@ function addBoxCut() {
   refreshKfUI();
 }
 
+function addBoxSplit() {
+  // Carve an EDITABLE sub-segment out of the crop (vs addBoxCut which carves a
+  // black gap): the middle window starts as a COPY of the current box, the
+  // surrounding box resumes after — scrub into the window + redraw to change ONLY
+  // that stretch (e.g. frames 40–50 get a different crop, 1–40 / 50–100 stay).
+  if (!state.box.length) {
+    setStatus($('#tr-status'), 'Crop has no box to split — draw or auto-box it first', 'err');
+    return;
+  }
+  const dur = cutDur();
+  const a = state.currentTime;
+  const cur = boxAt(a);
+  if (!cur || cur.gap) {
+    setStatus($('#tr-status'), 'Crop is empty (off) here — scrub to where it shows, then split', 'err');
+    return;
+  }
+  const b = Math.min(a + 2.0, dur);
+  if (b - a < CUT_MIN + 1e-3) {
+    setStatus($('#tr-status'), 'Move the playhead earlier — not enough room to split here', 'err');
+    return;
+  }
+  const at = boxAt(b);
+  const resumeOn = !!(at && !at.gap);
+  const fit = cur.fit || 'cover';
+  state.box = state.box.filter((k) => !(k.t > a + 0.15 && k.t < b - 0.15));
+  _cutUpsertAt(a, { x: cur.x, y: cur.y, w: cur.w, h: cur.h, interp: 'hold', fit, gap: false });
+  if (resumeOn && b < dur - 1e-3) {
+    _cutUpsertAt(b, { x: at.x, y: at.y, w: at.w, h: at.h, interp: 'hold', fit: at.fit || fit, gap: false });
+  }
+  setStatus($('#tr-status'),
+    `Crop split ${a.toFixed(2)}–${b.toFixed(2)}s · scrub into this window + draw to change it; drag the bar edges to resize`, 'ok');
+  refreshKfUI();
+}
+
 function onCutBarDblClick(e) {
   const bar = e.target.closest('.cut-bar');
   if (!bar) return;
@@ -397,6 +431,7 @@ function removeBoxCut(i) {
 }
 
 $('#btn-cut-1').addEventListener('click', addBoxCut);
+$('#btn-split-1') && $('#btn-split-1').addEventListener('click', addBoxSplit);
 $('#cuts-1').addEventListener('mousedown', onCutBarDown);
 $('#cuts-1').addEventListener('dblclick', onCutBarDblClick);
 window.addEventListener('mousemove', onCutDragMove);

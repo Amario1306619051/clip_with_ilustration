@@ -183,10 +183,12 @@ class AutoBoxRequest(BaseModel):
     box: int = 1
     step_seconds: float = 0.4   # timing PRECISION — sampling is adaptive (~1s grid, denser only at changes)
     padding: float = 0.05
+    head_room: float = 0.10     # extra TOP-only headroom for the person box (no chin/forehead clip)
     smooth: bool = True
     lock_size: bool = True   # lock one box size across the range (pan only) — stable framing
     director: bool = False      # windowed shot-director pre-pass (frames+transcript → richer segments+pan)
     diarization: bool = False   # add the dominant-speaker hint (needs pyannote + HF token)
+    expect: str = ""            # desired-OUTPUT expectation prompt (guides the director)
 
 
 class AutoBoxResponse(BaseModel):

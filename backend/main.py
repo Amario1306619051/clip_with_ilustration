@@ -151,11 +151,11 @@ def api_autobox(req: AutoBoxRequest):
         out = autobox.predict_track(
             src, req.prompt, req.t_start, req.t_end,
             step_seconds=req.step_seconds, padding=req.padding, smooth=req.smooth,
-            lock_size=req.lock_size,
+            lock_size=req.lock_size, head_room=req.head_room,
             # the single crop box follows the streamer — tells fullscreen layout
             # segments to use the whole frame (only matters with {layout} prompts)
             role={1: "streamer"}.get(req.box),
-            use_director=req.director, words=words, turns=turns,
+            use_director=req.director, words=words, turns=turns, expect=req.expect,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -351,4 +351,4 @@ app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="static
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("main:app", host="127.0.0.1", port=8031, reload=False)

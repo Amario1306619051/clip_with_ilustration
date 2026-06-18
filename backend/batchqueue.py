@@ -73,7 +73,7 @@ CAPTION_SIZE = 64
 # is its own pool of worker threads that atomically CLAIM jobs from its input
 # status, so no two grab the same clip.
 DOWNLOAD_WORKERS = 2
-BOXING_WORKERS = 2
+BOXING_WORKERS = 3
 RENDER_WORKERS = 2
 
 # Statuses (download and boxing are now SEPARATE stages so they parallelize):
@@ -92,7 +92,7 @@ _box_durations: list = []       # recent boxing wall-times (s), for the ETA esti
 _JOB_COLS = [
     "key", "id", "url", "start", "end", "title", "description",
     "prompt1", "prompt2", "context", "segment_seconds", "padding",
-    "step_seconds", "room_id", "director", "diarization", "transcript",
+    "step_seconds", "room_id", "director", "diarization", "transcript", "expect",
     "status", "message", "job_id", "video_path",
     "width", "height", "duration", "output_path", "filename",
 ]
@@ -134,7 +134,7 @@ def _init_db() -> None:
             id TEXT, url TEXT, start TEXT, "end" TEXT, title TEXT, description TEXT,
             prompt1 TEXT, prompt2 TEXT, context TEXT,
             segment_seconds REAL, padding REAL, step_seconds REAL, room_id INTEGER,
-            director INTEGER, diarization INTEGER, transcript TEXT,
+            director INTEGER, diarization INTEGER, transcript TEXT, expect TEXT,
             status TEXT, message TEXT, job_id TEXT, video_path TEXT,
             width INTEGER, height INTEGER, duration REAL,
             output_path TEXT, filename TEXT
@@ -147,6 +147,7 @@ def _init_db() -> None:
                     "ALTER TABLE jobs ADD COLUMN director INTEGER",
                     "ALTER TABLE jobs ADD COLUMN diarization INTEGER",
                     "ALTER TABLE jobs ADD COLUMN transcript TEXT",
+                    "ALTER TABLE jobs ADD COLUMN expect TEXT",
                     "ALTER TABLE keyframes ADD COLUMN dynamic INTEGER",
                     "ALTER TABLE keyframes ADD COLUMN moving INTEGER"):
             try:
@@ -266,7 +267,8 @@ def _to_float(v) -> Optional[float]:
 
 
 def _clip_to_job(url: str, clip: dict, default_context: str = "",
-                 default_director: bool = False, default_diar: bool = False) -> dict:
+                 default_director: bool = False, default_diar: bool = False,
+                 default_expect: str = "") -> dict:
     cid = str(clip.get("id") or uuid.uuid4().hex[:8])
     return {
         "key": uuid.uuid4().hex[:12],   # internal, URL-safe id used by the API
@@ -305,6 +307,8 @@ def _clip_to_job(url: str, clip: dict, default_context: str = "",
         "diarization": 1 if (clip.get("diarization") if clip.get("diarization") is not None
                              else default_diar) else 0,
         "transcript": None,
+        # per-clip desired-OUTPUT expectation (file-level _expect default) — fed to the director
+        "expect": str(clip.get("expect") or default_expect or ""),
         "status": "pending",
         "message": "queued",
         "job_id": None,                 # temp/{job_id}.mp4 once downloaded
@@ -329,6 +333,7 @@ def import_text(content: str, room_id=None) -> dict:
     # override these). underscore = clearly not a URL, popped before the URL loop.
     default_director = bool(data.pop("_director", False))
     default_diar = bool(data.pop("_diarization", False))
+    default_expect = str(data.pop("_expect", "") or "")
     rid = int(room_id) if room_id not in (None, "", "all") else None
 
     added, skipped = 0, 0
@@ -341,7 +346,7 @@ def import_text(content: str, room_id=None) -> dict:
                 if not isinstance(clip, dict):
                     continue
                 job = _clip_to_job(str(url), clip, default_context,
-                                   default_director, default_diar)
+                                   default_director, default_diar, default_expect)
                 job["room_id"] = rid
                 if job["id"] in existing_ids:
                     skipped += 1
@@ -539,9 +544,11 @@ def _predict_box(src, prompt: str, dur: float, padding=None, role=None,
     if not (prompt or "").strip() or not vision.enabled():
         return None
     pad = 0.05 if padding is None else max(0.0, float(padding))
+    # head_room is applied by predict_track only for role in (streamer, None) — box2
+    # (content) is unaffected, so passing the default to both calls is safe.
     out = autobox.predict_track(src, prompt, 0.0, dur, padding=pad, lock_size=True,
                                 role=role, step_seconds=_norm_step(step),
-                                segments=segments)
+                                segments=segments, head_room=0.10)
     return out.get("keyframes") or None
 
 
@@ -623,7 +630,8 @@ def _predict_boxes(job: dict) -> None:
                     turns = []
             _update(key, message="director: analysing windows…")
             segs, dnote = autobox.run_director(src, 0.0, dur, w_, h_, p1m,
-                                               words=words, turns=turns)
+                                               words=words, turns=turns,
+                                               expect=(job.get("expect") or ""))
             segs = segs or None   # director found nothing → fall through to geometric
             if dnote:
                 notes.append(dnote)
@@ -682,6 +690,49 @@ def _predict_boxes(job: dict) -> None:
                 box1 = autobox.debounce_track(box1, w=w_, h=h_)
             if box2:
                 box2 = autobox.debounce_track(box2, w=w_, h=h_)
+            # final CALM pass: median-filter size/position so the per-keyframe
+            # seam-snap flicker at split<->full cuts (e.g. box1 oscillating
+            # ~586<->1153 every 0.25s) collapses, while real transitions are kept
+            if box1:
+                box1 = autobox.settle_track(box1, w_, h_)
+            if box2:
+                box2 = autobox.settle_track(box2, w_, h_)
+        # SELF-VERIFY (director clips only): render the FINAL crops and ask the VLM
+        # if each segment is well-framed / the right subject → gap wrong-subject,
+        # widen cut-off. Best-effort (pass on garbage); runs LAST, on the boxes the
+        # renderer will use. Gated on director so the live/plain path stays fast.
+        if job.get("director") and w_ and h_ and vision.enabled():
+            try:
+                g0 = sum(1 for k in (box1 or []) if k.get("gap")) + \
+                     sum(1 for k in (box2 or []) if k.get("gap"))
+                box1, box2 = autobox.verify_framing(
+                    src, box1, box2, w_, h_, descs={1: p1m, 2: p2m},
+                    full_focus_when_single=(NUM_BOXES >= 2))
+                g1 = sum(1 for k in (box1 or []) if k.get("gap")) + \
+                     sum(1 for k in (box2 or []) if k.get("gap"))
+                if g1 != g0:
+                    notes.append(f"framing-verify adjusted {g1 - g0} segment(s)")
+            except Exception as e:  # noqa: BLE001 — verify is best-effort
+                log.warning("verify_framing failed (%s): %s", job["id"], e)
+        # DIRECTOR REVIEW (Phase 4, director clips only): the director WATCHES the
+        # actual crop preview across each segment (a short sequence of frames, like
+        # its window — motion, not one instant) and commands the EDITOR (blur/cover/
+        # zoom/up) + CAMERAMAN (redetect) to fix framing the geometry missed — e.g.
+        # an off-centre / half-cut subject in a full segment. Bounded; never gaps a
+        # box. Runs LAST, on the boxes the renderer will use. (Single box: box2 is None.)
+        if job.get("director") and segs and w_ and h_ and vision.enabled():
+            try:
+                _update(key, message="director: reviewing crop preview…")
+                box1, box2, rvnote = autobox.review_and_revise(
+                    src, box1 or [], box2 or [], segs, w_, h_,
+                    expect=(job.get("expect") or ""), p1=p1m, p2=p2m,
+                    words=words, turns=turns)
+                box1 = box1 or None
+                box2 = box2 or None
+                if rvnote and rvnote != "review: no changes":
+                    notes.append(rvnote)
+            except Exception as e:  # noqa: BLE001 — review is best-effort
+                log.warning("review_and_revise failed (%s): %s", job["id"], e)
         # stretches too dynamic to box are left empty + flagged → tell the user
         # so they know to draw those by hand (the sidebar surfaces it).
         dyn = sum(1 for k in (box1 or []) + (box2 or []) if k.get("dynamic"))
