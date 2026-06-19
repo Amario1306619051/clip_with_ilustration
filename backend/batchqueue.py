@@ -697,6 +697,20 @@ def _predict_boxes(job: dict) -> None:
                 box1 = autobox.settle_track(box1, w_, h_)
             if box2:
                 box2 = autobox.settle_track(box2, w_, h_)
+            # TIMING (continuity): snap each box's on/off transition onto the REAL
+            # scene-cut so it appears/disappears exactly when the content cuts (not
+            # ~0.5s early as the detector caught a slide/fade-in). Director clips only.
+            if job.get("director") and (box1 or box2):
+                try:
+                    cuts = autobox._detect_scene_cuts(src)
+                    # always snap (the fn also applies the soft-ON appear-lag when no
+                    # hard cut is near → boxes don't appear before slide/fade-in settles)
+                    if box1:
+                        box1 = autobox.snap_transitions_to_cuts(box1, cuts)
+                    if box2:
+                        box2 = autobox.snap_transitions_to_cuts(box2, cuts)
+                except Exception as e:  # noqa: BLE001 — best-effort
+                    log.warning("cut-snap failed (%s): %s", job["id"], e)
         # SELF-VERIFY (director clips only): render the FINAL crops and ask the VLM
         # if each segment is well-framed / the right subject → gap wrong-subject,
         # widen cut-off. Best-effort (pass on garbage); runs LAST, on the boxes the

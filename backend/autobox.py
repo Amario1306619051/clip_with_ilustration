@@ -13,6 +13,7 @@ import base64
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -1873,6 +1874,101 @@ _DIR_LEAD = 0.3        # DEPRECATED — boundaries are now CENTRED on the change
 _DIR_MAX_WINDOWS = 48  # cost cap: widen the hop on long clips
 _DIR_MIN_SEG = 1.5     # merge segments shorter than this (kills full<->split flicker)
 _DIR_SIDE_MIN_WINDOWS = 1  # consecutive opposite-side windows before box1 flips side (debounce)
+_DIR_SNAP_WIN = 0.8    # snap a director boundary onto a real scene-cut within this window (s)
+_SCENE_THRESH = 0.4    # ffmpeg scene-score above which a frame is a hard cut
+_APPEAR_LAG = 0.35     # a box turning ON via a SOFT (no hard-cut) transition appears this
+                       # much later, so slide/fade-in content settles before the box shows
+
+
+def snap_transitions_to_cuts(kfs: list, cuts: list, win: float = _DIR_SNAP_WIN,
+                             appear_lag: float = _APPEAR_LAG) -> list:
+    """Make a box turn ON/OFF at the RIGHT instant:
+      - if a real scene-cut is within `win` of the transition → snap onto it (a hard
+        cut is the ground truth);
+      - else, for a box turning ON (gap→real) with NO nearby cut, it's a SOFT
+        slide/fade-in — the detector caught its START, so the box looks ~0.5s early →
+        nudge it LATER by `appear_lag` so the content has settled before it shows.
+    Conservative: never past neighbours, never touches moving/dynamic kfs. Returns
+    the (re-sorted) kfs."""
+    if not kfs or len(kfs) < 2:
+        return kfs
+    cuts = cuts or []
+    ks = sorted([dict(k) for k in kfs], key=lambda k: k.get("t", 0.0))
+    for i in range(1, len(ks)):
+        prev, cur = ks[i - 1], ks[i]
+        if cur.get("moving") or cur.get("dynamic"):
+            continue
+        if bool(prev.get("gap")) == bool(cur.get("gap")):   # not a gap<->real flip
+            continue
+        b = float(cur["t"])
+        lo = float(prev["t"]) + 0.2
+        hi = (float(ks[i + 1]["t"]) - 0.2) if i + 1 < len(ks) else b + max(win, appear_lag) + 0.5
+        if hi <= lo:
+            continue
+        near = min(cuts, key=lambda c: abs(c - b)) if cuts else None
+        if near is not None and abs(near - b) <= win:
+            cur["t"] = round(max(lo, min(near, hi)), 3)              # hard cut → on the cut
+        elif prev.get("gap") and not cur.get("gap") and appear_lag > 0:
+            cur["t"] = round(max(lo, min(b + appear_lag, hi)), 3)    # soft box-ON → settle lag
+    ks.sort(key=lambda k: k.get("t", 0.0))
+    return ks
+
+
+def _detect_scene_cuts(src: Path, threshold: float = _SCENE_THRESH) -> list:
+    """Timestamps (s, clip clock) where the video CONTENT changes sharply, via
+    ffmpeg's scene score. The clip file is already trimmed to the clip range, so
+    pts_time IS clip time. Used to SNAP director boundaries onto the REAL cut, so a
+    layout switch lands exactly when the scene changes (not when the windowed
+    director first noticed). Returns a sorted list; [] on any failure (degrades to
+    the centred estimate)."""
+    try:
+        cmd = ["ffmpeg", "-hide_banner", "-nostats", "-i", str(src),
+               "-filter:v", f"select='gt(scene,{threshold})',metadata=print",
+               "-an", "-f", "null", "-"]
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        cuts = []
+        for line in r.stderr.splitlines():
+            m = re.search(r"pts_time:([0-9.]+)", line)
+            if m:
+                cuts.append(round(float(m.group(1)), 3))
+        return sorted(set(cuts))
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("scene-cut detect failed: %s", e)
+        return []
+
+
+def qc_clip(source_path: Path, box1: list, box2: list, w: int, h: int,
+            dur: float, expect: str = "", n: int = 4) -> Optional[dict]:
+    """QUALITY-CONTROL a finished clip: sample n composite crop-previews across the
+    clip and ask the VLM for an overall framing score + issues. Returns
+    {"score": int|None, "issues": [str,...]} or None when vision is off / nothing to
+    show. Best-effort — never raises into the boxing pipeline."""
+    if not vision.enabled() or not (w and h) or not (dur and dur > 0.5):
+        return None
+    previews = []
+    for f in [0.12, 0.37, 0.63, 0.88][:max(1, n)]:
+        t = round(dur * f, 3)
+        a1 = _box_at(box1 or [], t)
+        a2 = _box_at(box2 or [], t)
+        if not a1 and not a2:
+            continue
+        p = _composite_preview_b64(source_path, t, a1, a2)
+        if p:
+            previews.append(p)
+    if not previews:
+        return None
+    orig = _extract_frame_b64(source_path, round(dur * 0.5, 3))
+    if not orig:
+        return None
+    v = vision.qc_score(orig, previews, expect=expect)
+    if not isinstance(v, dict):
+        return None
+    try:
+        score = max(0, min(100, int(v.get("score"))))
+    except (TypeError, ValueError):
+        score = None
+    issues = [str(x).strip() for x in (v.get("issues") or []) if str(x).strip()][:5]
+    return {"score": score, "issues": issues}
 
 
 def run_director(source_path: Path, t0: float, t1: float, w: int, h: int,
@@ -2030,10 +2126,19 @@ def run_director(source_path: Path, t0: float, t1: float, w: int, h: int,
     # tapi bbox udah keganti duluan"). So push each boundary FORWARD by that centring
     # offset, clamped to leave >=0.4s on both sides.
     off = max(0.0, _DIR_WIN / 2.0 - hop / 2.0)
+    cuts = _detect_scene_cuts(source_path) if len(segs) > 1 else []
+    snapped = 0
     for i in range(1, len(segs)):
         lo = segs[i - 1]["t0"] + 0.4
         hi = segs[i]["t1"] - 0.4
         b = segs[i]["t0"] + off
+        # SNAP onto a real scene-cut when one is within _DIR_SNAP_WIN of the estimate
+        # (a hard cut in the source is ground truth; the windowed estimate is ~±0.5s)
+        if cuts:
+            near = min(cuts, key=lambda c: abs(c - b))
+            if abs(near - b) <= _DIR_SNAP_WIN:
+                b = near
+                snapped += 1
         b = max(lo, min(b, hi)) if hi > lo else lo
         segs[i - 1]["t1"] = b
         segs[i]["t0"] = b
@@ -2043,6 +2148,8 @@ def run_director(source_path: Path, t0: float, t1: float, w: int, h: int,
         f"{s['layout']}{('(' + s['side'] + ')') if s['side'] else ''} "
         f"{s['t0']:.1f}–{s['t1']:.1f}s{' [pan]' if s['moving'] else ''}"
         for s in segs)
+    if snapped:
+        note += f" · {snapped} cut-snapped"
     return segs, note
 
 

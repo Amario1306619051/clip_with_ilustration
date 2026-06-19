@@ -417,6 +417,55 @@ def review_shot(orig_b64: str, preview_b64s, expect: str = "",
         return None
 
 
+_QC_TAIL = (
+    "\nIMAGE 1 is an original frame for reference. The REMAINING images are the 9:16 "
+    "CROP PREVIEW of a FINISHED vertical reel at several moments. Rate the OVERALL "
+    "framing quality and list the problems. Reply with ONLY a compact JSON object — "
+    "no prose:\n"
+    '{"score":85,"issues":["short phrase","..."]}\n'
+    "score is 0-100. LOWER it for: a head/face clipped by an edge; the WRONG subject "
+    "framed; a black/empty slot that should show content; a subject badly off-centre "
+    "or half-cut; both halves showing the same thing; or framing that ignores the "
+    "DESIRED OUTPUT. 100 = every shot is clean. issues = [] when it is good."
+)
+
+
+def qc_score(orig_b64: str, preview_b64s, expect: str = "",
+             max_tokens: int = 260) -> Optional[dict]:
+    """QUALITY-CONTROL pass over a finished clip: shows a few crop-preview frames and
+    returns {"score": 0-100, "issues": [...]} so the queue can flag the worst clips
+    for a human. Returns the parsed dict or None on failure (caller treats None as
+    'unscored', never blocks). enable_thinking=False (reasoning model)."""
+    if isinstance(preview_b64s, str):
+        preview_b64s = [preview_b64s]
+    preview_b64s = [p for p in (preview_b64s or []) if p]
+    if len(preview_b64s) > 5:
+        n = len(preview_b64s)
+        preview_b64s = [preview_b64s[round(i * (n - 1) / 4)] for i in range(5)]
+    if not enabled() or not orig_b64 or not preview_b64s:
+        return None
+    head = ("DESIRED OUTPUT: " + expect.strip() + "\n") if (expect or "").strip() else ""
+    content = [
+        {"type": "text", "text": head + _QC_TAIL},
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{orig_b64}"}},
+    ]
+    for p in preview_b64s:
+        content.append({"type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{p}"}})
+    try:
+        resp = _client().chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "user", "content": content}],
+            temperature=0,
+            max_tokens=max_tokens,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        return _parse_json(resp.choices[0].message.content or "")
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("vision.qc_score request failed: %s", e)
+        return None
+
+
 def detect_box(image_b64: str, prompt: str, frame_w: int, frame_h: int,
                max_area_frac: float = 1.0, min_area_frac: float = 0.0,
                max_aspect: float = float("inf")) -> Optional[dict]:
