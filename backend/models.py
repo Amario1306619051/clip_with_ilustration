@@ -113,6 +113,9 @@ class IllustrationPick(BaseModel):
     t_start: float
     t_end: float
     url: str  # the picked candidate's `full` URL
+    # Ken Burns motion for this image, always kept inside the frame:
+    # "none" | "zoom_in" | "zoom_out" | "pan_left" | "pan_right".
+    motion: str = "none"
 
 
 CAPTION_FONTS = [
@@ -124,6 +127,15 @@ CAPTION_FONTS = [
     "Arial",
     "Impact",
 ]
+
+
+class FullscreenWindow(BaseModel):
+    """A [start, end] window (seconds, clip time) where the VIDEO fills the whole
+    9:16 frame — no illustration split. Outside these windows the layout is the
+    normal top-video + bottom-illustration. Lets the editor toggle, per window,
+    whether an illustration is shown ('ON') or the video goes full-screen ('OFF')."""
+    t_start: float
+    t_end: float
 
 
 class SfxPlacement(BaseModel):
@@ -162,6 +174,11 @@ class RenderRequest(BaseModel):
     render_end: Optional[float] = None
     # Soundboard sound effects mixed into the audio (one-shot + range/loop).
     sfx: list[SfxPlacement] = Field(default_factory=list)
+    # Top/bottom split: video crop fills top_eighths/8 of the height (3, 3.5 or
+    # 4); the illustration slot takes the rest. 3.0 = the original 720/1200.
+    top_eighths: float = 3.0
+    # Windows where the video fills the whole 9:16 frame (no illustration).
+    fullscreen_windows: list[FullscreenWindow] = Field(default_factory=list)
 
 
 class RenderResponse(BaseModel):
@@ -239,3 +256,5 @@ class QueueJobPatch(BaseModel):
     context: Optional[str] = None
     prompt1: Optional[str] = None
     prompt2: Optional[str] = None
+    # Per-clip top/bottom split (3, 3.5 or 4 eighths for the video slot).
+    top_eighths: Optional[float] = None

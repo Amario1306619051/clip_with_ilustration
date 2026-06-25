@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=20260623f">
 </head>
 <body>
 <header class="topbar">
@@ -137,10 +137,19 @@
         <div class="box-controls">
           <div class="box-pill" id="pill-1">
             <span class="dot dot-1"></span>
-            <span>Crop box · TOP slot (3/8, 3:2)</span>
+            <span>Crop box · TOP slot</span>
             <span class="kf-count" id="kf-count-1">0 kf</span>
             <button data-clear="1" title="clear all keyframes">×</button>
           </div>
+        </div>
+
+        <div class="cut-controls">
+          <span class="cut-controls-lbl">Top / bottom split — video slot height:</span>
+          <select id="top-eighths" title="How tall the video (top) slot is vs the illustration (bottom) slot. Bottom takes the rest. The render guide updates to match.">
+            <option value="3" selected>3/8 · video 720 / illustration 1200</option>
+            <option value="3.5">3.5/8 · video 840 / illustration 1080</option>
+            <option value="4">4/8 · video 960 / illustration 960</option>
+          </select>
         </div>
 
         <div class="cut-controls">
@@ -171,8 +180,8 @@
               <option value="0.2">Precise · 0.2s</option>
             </select>
             <label class="ab-check" title="Lock one box size across the range and only pan — stable framing, no zoom jitter"><input type="checkbox" id="ab-lock" checked> Stable size</label>
-            <label class="ab-check" title="Shot-director: shows the model a window of frames + the transcript so it decides layout, who to box, and pans moving subjects — better on podcasts / reactions (slower: runs Whisper)"><input type="checkbox" id="ab-director"> Director</label>
-            <label class="ab-check" title="Speaker diarization (needs pyannote + HF token): adds a who-is-talking hint to the director"><input type="checkbox" id="ab-diarize"> Diarize</label>
+            <label class="ab-check" title="Shot-director: shows the model a window of frames + the transcript so it decides layout, who to box, and pans moving subjects — better on podcasts / reactions (slower: runs Whisper)"><input type="checkbox" id="ab-director" checked> Director</label>
+            <label class="ab-check" title="Speaker diarization (needs pyannote + HF token): adds a who-is-talking hint to the director"><input type="checkbox" id="ab-diarize" checked> Diarize</label>
             <button id="ab-generate" class="primary">Generate</button>
           </div>
           <div class="ab-range" id="ab-range" title="drag the two handles to set the time range to auto-predict">
@@ -229,8 +238,26 @@
         <span>Duration per illustration (seconds)</span>
         <input type="number" id="seg-seconds" value="5" min="1" max="30" step="1">
       </label>
+      <label>
+        <span>Motion (image never leaves the frame)</span>
+        <select id="ill-motion">
+          <option value="auto" selected>Auto (varied)</option>
+          <option value="none">Off (static)</option>
+          <option value="zoom_in">Zoom in</option>
+          <option value="zoom_out">Zoom out</option>
+          <option value="pan_right">Pan →</option>
+          <option value="pan_left">Pan ←</option>
+        </select>
+      </label>
       <button id="btn-plan" class="primary">Generate illustrations →</button>
       <span class="status" id="plan-status"></span>
+    </div>
+
+    <div class="cut-lanes" id="ill-bar-lanes">
+      <div class="cut-lane" data-box="ill">
+        <span class="cut-lane-lbl" title="Each image's on-screen window. Drag a bar to move it, drag its edges to resize — give one image more time, the neighbour less.">Timing</span>
+        <div class="cut-lane-track" id="ill-bars"></div>
+      </div>
     </div>
 
     <div class="ill-segments" id="ill-segments">
@@ -474,6 +501,6 @@
 
 </div>
 
-<script src="app.js"></script>
+<script src="app.js?v=20260623f"></script>
 </body>
 </html>

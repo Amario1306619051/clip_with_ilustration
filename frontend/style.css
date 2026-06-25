@@ -612,6 +612,17 @@ kbd {
   background: repeating-linear-gradient(45deg, rgba(255,157,46,.40) 0 4px, transparent 4px 8px);
   border: 1px dashed #ff9d2e;
 }
+/* OFF window = full-screen video (no illustration) — amber, solid. */
+.cut-bar.vfull {
+  background: rgba(255,157,46,.28); border: 1px solid #ff9d2e; cursor: move;
+}
+.seg-card.off { opacity: .9; }
+.seg-fullscreen {
+  display: inline-block; padding: 10px 12px; font-size: 12px; color: #ffb24d;
+  background: rgba(255,157,46,.10); border: 1px dashed rgba(255,157,46,.5); border-radius: 6px;
+}
+.seg-mode { white-space: nowrap; }
+.seg-card.off .seg-mode { color: #ffb24d; border-color: rgba(255,157,46,.5); }
 .cut-bar-lbl {
   font-size: 9px; font-weight: 700; letter-spacing: .04em;
   color: var(--text); pointer-events: none; white-space: nowrap;

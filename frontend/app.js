@@ -9,11 +9,28 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 
 const PREVIEW_W = 270, PREVIEW_H = 480;
-const TOP_FRAC = 3 / 8;            // top slot = 3/8 of height
-const TOP_PH = Math.round(PREVIEW_H * TOP_FRAC); // 180
-// The crop box always renders into the top slot (1080×720 → 3:2). The box is
-// FREE-FORM (any size); a render-area guide shows what survives the cover-crop.
-const BOX_AR = 1080 / 720;         // 1.5
+// Top slot = top_eighths/8 of the height — CHOSEN per clip (3, 3.5 or 4). The
+// crop box renders into this slot, so the slot boundary + the box's target AR
+// both depend on the split. Functions (not consts) so they track state.topEighths.
+function topFrac() { return (state.topEighths || 3) / 8; }          // 0.375 · 0.4375 · 0.5
+function topPH() { return Math.round(PREVIEW_H * topFrac()); }      // slot boundary in the preview
+// The box is FREE-FORM (any size); a render-area guide shows what survives the
+// cover-crop into the top slot (AR = 1080 : slot-height).
+function boxAR() { return 1080 / (1920 * topFrac()); }             // 1.5 · 1.286 · 1.125
+
+// Apply a top/bottom split (3 · 3.5 · 4 eighths): snap to an allowed value, sync
+// state + the selector, and redraw the crop guide (its AR changes) + the preview
+// (the slot boundary moves). Does NOT autosave — callers decide (job-open must not).
+function applyTopEighths(v) {
+  const allowed = [3, 3.5, 4];
+  let e = Number(v) || 3;
+  e = allowed.reduce((a, b) => (Math.abs(b - e) < Math.abs(a - e) ? b : a), 3);
+  state.topEighths = e;
+  const sel = document.querySelector('#top-eighths');
+  if (sel) sel.value = String(e);
+  if (typeof drawOverlay === 'function') drawOverlay();
+  if (typeof drawPreview === 'function') drawPreview(document.querySelector('#preview'));
+}
 
 // Centered slot-AR sub-rect that survives a cover-crop (the rest is cropped).
 // Mirrors the backend cover math + the preview. Pure.
@@ -43,10 +60,13 @@ const state = {
   words: [],
   segments: [],     // plan result; each gets .picked (url or null)
   segSeconds: 5,
+  topEighths: 3,    // top video slot height in eighths (3 · 3.5 · 4); bottom = rest
+
   activeBox: null,  // null | 1
   currentTime: 0,
   abDrag: null,                          // 'start' | 'end' while dragging a range handle
   cutDrag: null,                         // drag state for a crop cut bar (Crop step)
+  illDrag: null,                         // drag state for an illustration timing bar (Illustration step)
   autoRange: { start: 0, end: null },    // AI auto-box time range (null end = clip end)
   activeQueueKey: null,                  // batch-queue job currently loaded (null = ad-hoc)
   queueSig: null,                        // signature of last auto-saved queue state
@@ -432,6 +452,11 @@ function removeBoxCut(i) {
 
 $('#btn-cut-1').addEventListener('click', addBoxCut);
 $('#btn-split-1') && $('#btn-split-1').addEventListener('click', addBoxSplit);
+// Top/bottom split selector — redraw the guide/preview, then persist per job.
+$('#top-eighths') && $('#top-eighths').addEventListener('change', (e) => {
+  applyTopEighths(e.target.value);
+  autosaveQueue();
+});
 $('#cuts-1').addEventListener('mousedown', onCutBarDown);
 $('#cuts-1').addEventListener('dblclick', onCutBarDblClick);
 window.addEventListener('mousemove', onCutDragMove);
@@ -630,7 +655,7 @@ function drawOverlay(tempRect) {
   const fit = tempRect ? 'cover' : ((boxAt(state.currentTime) || {}).fit || 'cover');
   if (fit !== 'blur_pad' && r.w > 1 && r.h > 1) {
     const sa = overlayToSource(r.x, r.y), sb = overlayToSource(r.x + r.w, r.y + r.h);
-    const keep = coverKeepRect({ x: sa.x, y: sa.y, w: sb.x - sa.x, h: sb.y - sa.y }, BOX_AR);
+    const keep = coverKeepRect({ x: sa.x, y: sa.y, w: sb.x - sa.x, h: sb.y - sa.y }, boxAR());
     const ka = sourceToOverlay(keep.x, keep.y), kb = sourceToOverlay(keep.x + keep.w, keep.y + keep.h);
     octx.fillStyle = 'rgba(0,0,0,0.5)';
     if (ka.x > r.x) octx.fillRect(r.x, r.y, ka.x - r.x, r.h);
@@ -782,31 +807,42 @@ function startKfTimeEdit(span) {
 function drawPreview(canvas) {
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
+  const tph = topPH();   // slot boundary — moves with the chosen 3/8 · 3.5/8 · 4/8 split
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, PREVIEW_W, PREVIEW_H);
+
+  // OFF window → video fills the WHOLE 9:16 frame (no split, no illustration).
+  const offSeg = state.segments.find((s) => s.off && state.currentTime >= s.t_start && state.currentTime < s.t_end);
+  if (offSeg) {
+    const bf = boxAt(state.currentTime);
+    if (bf && !bf.gap && video.videoWidth) {
+      drawCover(ctx, video, bf.x, bf.y, bf.w, bf.h, 0, 0, PREVIEW_W, PREVIEW_H, bf.fit === 'blur_pad');
+    }
+    return;
+  }
 
   // top slot: cropped video (a gap kf → leave the slot black: box is "off" here)
   const b = boxAt(state.currentTime);
   if (b && !b.gap && video.videoWidth) {
-    drawCover(ctx, video, b.x, b.y, b.w, b.h, 0, 0, PREVIEW_W, TOP_PH, b.fit === 'blur_pad');
+    drawCover(ctx, video, b.x, b.y, b.w, b.h, 0, 0, PREVIEW_W, tph, b.fit === 'blur_pad');
   }
   // bottom slot: picked illustration for current time
   const seg = state.segments.find((s) => state.currentTime >= s.t_start && state.currentTime < s.t_end && s.picked);
   if (seg && seg._img && seg._img.complete) {
-    drawCover(ctx, seg._img, 0, 0, seg._img.naturalWidth, seg._img.naturalHeight, 0, TOP_PH, PREVIEW_W, PREVIEW_H - TOP_PH, false);
+    drawCover(ctx, seg._img, 0, 0, seg._img.naturalWidth, seg._img.naturalHeight, 0, tph, PREVIEW_W, PREVIEW_H - tph, false);
   } else {
     ctx.fillStyle = '#1d1d24';
-    ctx.fillRect(0, TOP_PH, PREVIEW_W, PREVIEW_H - TOP_PH);
+    ctx.fillRect(0, tph, PREVIEW_W, PREVIEW_H - tph);
     ctx.fillStyle = '#5a5a68';
     ctx.font = '10px JetBrains Mono';
     ctx.textAlign = 'center';
-    ctx.fillText('illustration', PREVIEW_W / 2, TOP_PH + (PREVIEW_H - TOP_PH) / 2);
+    ctx.fillText('illustration', PREVIEW_W / 2, tph + (PREVIEW_H - tph) / 2);
     ctx.textAlign = 'left';
   }
   // slot divider line (where caption sits)
   ctx.strokeStyle = 'rgba(232,255,58,0.4)';
   ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(0, TOP_PH); ctx.lineTo(PREVIEW_W, TOP_PH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, tph); ctx.lineTo(PREVIEW_W, tph); ctx.stroke();
 }
 
 // scale-cover (or contain+blur) src region into dest rect
@@ -868,7 +904,7 @@ $('#btn-plan').addEventListener('click', async () => {
       title: $('#f-title').value.trim() || 'clip',
       description: $('#f-desc').value.trim(),
     });
-    state.segments = (r.segments || []).map((s) => ({ ...s, picked: null, _img: null }));
+    state.segments = (r.segments || []).map((s) => ({ ...s, picked: null, _img: null, off: false }));
     // auto-pick first candidate per segment (so you can render right away)
     for (const s of state.segments) {
       if (s.candidates && s.candidates.length) pickCandidate(s, s.candidates[0], false);
@@ -890,9 +926,95 @@ function pickCandidate(seg, cand, rerender) {
   if (rerender) renderSegments();
 }
 
+// ── illustration timing bars ───────────────────────────────────────────
+// Each illustration owns a [t_start,t_end] window; together they tile [0,dur].
+// The lane shows one draggable bar per image — drag an EDGE to move the shared
+// boundary (one image gets more time, its neighbour less), or drag the BODY to
+// slide the whole window (eats the next, feeds the previous). Stays contiguous:
+// no black gaps, no overlaps. First start is locked to 0, last end to the clip.
+function renderIllBars() {
+  const host = $('#ill-bars');
+  if (!host) return;
+  const dur = cutDur();
+  if (!state.segments.length) {
+    host.innerHTML = '<span class="cut-lane-empty">— generate illustrations first —</span>';
+    return;
+  }
+  host.innerHTML = state.segments.map((s, i) => {
+    const left = (s.t_start / dur) * 100;
+    const width = Math.max(0.8, ((s.t_end - s.t_start) / dur) * 100);
+    const secs = (s.t_end - s.t_start).toFixed(1);
+    // OFF = full-screen video (no illustration) → distinct style + 🎬 label.
+    const cls = s.off ? 'cut-bar vfull' : 'cut-bar ' + (s.picked ? 'on' : 'gap');
+    const lbl = s.off ? `🎬 #${i + 1} · ${secs}s` : `🖼 #${i + 1} · ${secs}s`;
+    const tip = s.off
+      ? `Window #${i + 1}: ${s.t_start.toFixed(1)}–${s.t_end.toFixed(1)}s — FULL-SCREEN video (no illustration)`
+      : `Image #${i + 1}: ${s.t_start.toFixed(1)}–${s.t_end.toFixed(1)}s${s.picked ? '' : ' (no image picked yet)'}`;
+    return `<div class="${cls}" data-i="${i}" style="left:${left}%;width:${width}%" `
+      + `title="${tip} — drag to move, edges to resize">`
+      + `<span class="cut-bar-h l"></span><span class="cut-bar-lbl">${lbl}</span>`
+      + `<span class="cut-bar-h r"></span></div>`;
+  }).join('');
+}
+
+function onIllBarDown(e) {
+  const bar = e.target.closest('.cut-bar');
+  if (!bar) return;
+  e.preventDefault();
+  const i = +bar.dataset.i;
+  const segs = state.segments;
+  const s = segs[i];
+  if (!s) return;
+  const dur = cutDur();
+  const rect = $('#ill-bars').getBoundingClientRect();
+  const isH = e.target.classList.contains('cut-bar-h');
+  const last = segs.length - 1;
+  let mode = isH && e.target.classList.contains('l') ? 'resize-l'
+           : isH && e.target.classList.contains('r') ? 'resize-r' : 'move';
+  // the clip's outer edges are fixed: can't pull the first image's start off 0
+  // or the last image's end off the clip end → fall back to moving the body.
+  if (mode === 'resize-l' && i === 0) mode = 'move';
+  if (mode === 'resize-r' && i === last) mode = 'move';
+  state.illDrag = {
+    i, mode, startX: e.clientX, trackW: rect.width, dur,
+    a0: s.t_start, b0: s.t_end,
+    prevStart: i > 0 ? segs[i - 1].t_start : 0,      // outer clamp for the left neighbour
+    nextEnd: i < last ? segs[i + 1].t_end : dur,     // outer clamp for the right neighbour
+  };
+}
+
+function onIllDragMove(e) {
+  const d = state.illDrag;
+  if (!d) return;
+  const segs = state.segments;
+  const s = segs[d.i];
+  if (!s) { state.illDrag = null; return; }
+  const last = segs.length - 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * d.dur;
+  if (d.mode === 'resize-l') {
+    const ns = Math.max(d.prevStart + CUT_MIN, Math.min(d.a0 + dt, s.t_end - CUT_MIN));
+    s.t_start = +ns.toFixed(2);
+    if (d.i > 0) segs[d.i - 1].t_end = s.t_start;         // share the boundary
+  } else if (d.mode === 'resize-r') {
+    const ne = Math.max(s.t_start + CUT_MIN, Math.min(d.b0 + dt, d.nextEnd - CUT_MIN));
+    s.t_end = +ne.toFixed(2);
+    if (d.i < last) segs[d.i + 1].t_start = s.t_end;      // share the boundary
+  } else { // move — slide the whole window, neighbours follow to stay contiguous
+    const len = d.b0 - d.a0;
+    const lo = (d.i > 0 ? d.prevStart + CUT_MIN : 0);
+    const hi = (d.i < last ? d.nextEnd - CUT_MIN : d.dur) - len;
+    const ns = Math.max(lo, Math.min(d.a0 + dt, hi));
+    s.t_start = +ns.toFixed(2);
+    s.t_end = +(ns + len).toFixed(2);
+    if (d.i > 0) segs[d.i - 1].t_end = s.t_start;
+    if (d.i < last) segs[d.i + 1].t_start = s.t_end;
+  }
+  renderIllBars();
+}
+
 function renderSegments() {
   const host = $('#ill-segments');
-  if (!state.segments.length) { host.innerHTML = '<div class="muted">Not generated yet.</div>'; return; }
+  if (!state.segments.length) { host.innerHTML = '<div class="muted">Not generated yet.</div>'; renderIllBars(); return; }
   host.innerHTML = '';
   state.segments.forEach((seg) => {
     const card = document.createElement('div');
@@ -902,15 +1024,26 @@ function renderSegments() {
         <img src="${c.thumb}" alt="${(c.alt || '').replace(/"/g, '')}" loading="lazy">
         <span class="cand-by">${c.photographer || ''}</span>
       </div>`).join('');
+    if (seg.off) card.classList.add('off');
+    const body = seg.off
+      ? '<div class="seg-candidates"><span class="seg-fullscreen">🎬 Full-screen video — the clip fills the whole frame here, no illustration.</span></div>'
+      : `<div class="seg-candidates">${cands || '<span class="seg-none">No results (check PEXELS_API_KEY / edit the keyword).</span>'}</div>`;
     card.innerHTML = `
       <div class="seg-head">
         <span class="seg-time">${seg.t_start.toFixed(0)}–${seg.t_end.toFixed(0)}s</span>
         <span class="seg-text">"${(seg.text || '').slice(0, 80) || '(no speech)'}"</span>
-        <input class="seg-query" value="${(seg.query || '').replace(/"/g, '')}">
-        <button class="seg-research ghost">↻ search again</button>
+        <button class="seg-mode ghost" title="Toggle: show an illustration here, or let the video fill the whole 9:16 frame">${seg.off ? '🎬 Full-screen video' : '🖼 Illustration'}</button>
+        <input class="seg-query" value="${(seg.query || '').replace(/"/g, '')}" ${seg.off ? 'disabled' : ''}>
+        <button class="seg-research ghost" ${seg.off ? 'disabled' : ''}>↻ search again</button>
       </div>
-      <div class="seg-candidates">${cands || '<span class="seg-none">No results (check PEXELS_API_KEY / edit the keyword).</span>'}</div>`;
+      ${body}`;
 
+    // toggle illustration ↔ full-screen video for this window
+    card.querySelector('.seg-mode').addEventListener('click', () => {
+      seg.off = !seg.off;
+      renderSegments();
+      drawPreview($('#preview'));
+    });
     // candidate click → pick
     card.querySelectorAll('.cand').forEach((el) => el.addEventListener('click', () => {
       const c = seg.candidates.find((x) => x.id === el.dataset.id);
@@ -934,17 +1067,37 @@ function renderSegments() {
     });
     host.appendChild(card);
   });
+  renderIllBars();
 }
+
+$('#ill-bars').addEventListener('mousedown', onIllBarDown);
+window.addEventListener('mousemove', onIllDragMove);
+window.addEventListener('mouseup', () => {
+  if (state.illDrag) { state.illDrag = null; renderSegments(); }
+});
 
 $('#btn-to-render').addEventListener('click', () => showStep(4));
 
 // ───────────────────────── step 4: render ─────────────────────────
 $('#rd-clear').addEventListener('click', () => { $('#rd-start').value = ''; $('#rd-end').value = ''; });
 
+// "Auto" cycles through these so consecutive images alternate zoom/pan → variety.
+const MOTION_CYCLE = ['zoom_in', 'pan_right', 'zoom_out', 'pan_left'];
 function buildIllustrations() {
+  const mode = ($('#ill-motion') && $('#ill-motion').value) || 'auto';
   return state.segments
-    .filter((s) => s.picked)
-    .map((s) => ({ t_start: s.t_start, t_end: s.t_end, url: s.picked }));
+    .filter((s) => s.picked && !s.off)   // OFF windows show full-screen video, not an image
+    .map((s, i) => {
+      const motion = mode === 'auto' ? MOTION_CYCLE[i % MOTION_CYCLE.length] : mode;
+      return { t_start: s.t_start, t_end: s.t_end, url: s.picked, motion };
+    });
+}
+
+// OFF windows → the video fills the whole 9:16 frame (no illustration split).
+function buildFullscreen() {
+  return state.segments
+    .filter((s) => s.off)
+    .map((s) => ({ t_start: s.t_start, t_end: s.t_end }));
 }
 
 async function doRender(withCaption) {
@@ -958,6 +1111,7 @@ async function doRender(withCaption) {
       title: $('#f-title').value.trim() || 'clip',
       box: state.box,
       illustrations: buildIllustrations(),
+      fullscreen_windows: buildFullscreen(),
       words: withCaption ? state.words : [],
       caption_font: $('#cap-font').value,
       caption_size: Number($('#cap-size').value) || 64,
@@ -965,6 +1119,7 @@ async function doRender(withCaption) {
       render_start: rs === '' ? null : Number(rs),
       render_end: re === '' ? null : Number(re),
       sfx: state.sfx,
+      top_eighths: state.topEighths || 3,
     });
     setStatus($('#rd-status'), 'OK', 'ok');
     showResult(r);
@@ -1484,6 +1639,8 @@ async function openQueueJob(key) {
     $('#seg-seconds').value = job.segment_seconds;
     state.segSeconds = job.segment_seconds;
   }
+  // Pre-fill the per-clip top/bottom split (3/8 default). Snaps + redraws.
+  applyTopEighths(job.top_eighths || 3);
   video.src = job.video_path;
   $('#range-meta').textContent = `source: ${job.width}×${job.height} · ${(job.duration || 0).toFixed(1)}s`;
   state.queueSig = queueSig();
@@ -1499,6 +1656,7 @@ function queueSig() {
     b: state.box,
     ctx: ($('#ab-context') ? $('#ab-context').value : ''),
     p1: ($('#ab-prompt') ? $('#ab-prompt').value : ''),
+    te: state.topEighths,
   });
 }
 
@@ -1514,6 +1672,7 @@ async function autosaveQueue() {
       box1: state.box || [],
       context: $('#ab-context') ? $('#ab-context').value : '',
       prompt1: $('#ab-prompt') ? $('#ab-prompt').value : '',
+      top_eighths: state.topEighths || 3,
     });
     setStatus($('#queue-status'), 'Progress saved ✓', 'ok');
   } catch (e) { /* retry next tick */ }

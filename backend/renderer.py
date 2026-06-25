@@ -7,7 +7,7 @@ from typing import Optional
 
 import illustrator
 import soundboard
-from models import IllustrationPick, Keyframe, SfxPlacement, Word
+from models import FullscreenWindow, IllustrationPick, Keyframe, SfxPlacement, Word
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -260,8 +260,86 @@ def _shift_illustrations(picks: list[IllustrationPick], start: float, end: Optio
             ne = min(ne, end - start)
         if ne <= ns:
             continue
-        out.append(IllustrationPick(t_start=ns, t_end=ne, url=p.url))
+        out.append(IllustrationPick(t_start=ns, t_end=ne, url=p.url,
+                                    motion=getattr(p, "motion", "none") or "none"))
     return out
+
+
+def _shift_fullscreen(windows: list[FullscreenWindow], start: float,
+                      end: Optional[float]) -> list[FullscreenWindow]:
+    """Re-base full-screen windows onto the render sub-range (same math as
+    _shift_illustrations), dropping/clipping windows outside [start, end]."""
+    if (start <= 0) and end is None:
+        return windows
+    start = max(0.0, start or 0.0)
+    out: list[FullscreenWindow] = []
+    for w in windows or []:
+        if end is not None and w.t_start >= end:
+            continue
+        if w.t_end <= start:
+            continue
+        ns = max(0.0, w.t_start - start)
+        ne = w.t_end - start
+        if end is not None:
+            ne = min(ne, end - start)
+        if ne <= ns:
+            continue
+        out.append(FullscreenWindow(t_start=ns, t_end=ne))
+    return out
+
+
+# ── Ken Burns motion for the bottom-slot illustrations ─────────────────────
+MOTION_AMT = 0.12   # 12% zoom-in / pan travel — a gentle, pro-looking drift.
+
+
+def _ill_motion_chain(in_idx: int, i: int, pick: IllustrationPick, motion: str,
+                      bottom_h: int) -> list[str]:
+    """Build the filter chain for ONE moving illustration, producing `[ill{i}]`.
+
+    The motion is kept STRICTLY inside the frame (no black edges):
+      • zoom: cover the slot, scale by Z(t) (>=1, eval per frame), then center-crop
+        back to the slot — the crop is always a sub-region of the scaled image.
+      • pan : cover an OVERSIZED canvas (slot + headroom), then slide a slot-sized
+        crop window across it — the window never leaves the canvas.
+    Progress is linear over the window (classic Ken Burns drift). `t` here is the
+    image input's PTS (itsoffset-shifted), so it runs [t_start, t_end]."""
+    W, H = OUT_W, bottom_h
+    t0 = float(pick.t_start)
+    dur = max(0.001, float(pick.t_end) - t0)
+    k = f"clip((t-{t0:.3f})/{dur:.3f},0,1)"   # 0→1 across the window (single-quoted → commas OK)
+    out = f"ill{i}"
+    parts: list[str] = []
+
+    if motion in ("zoom_in", "zoom_out"):
+        if motion == "zoom_in":
+            z = f"(1+{MOTION_AMT:.3f}*{k})"          # 1.00 → 1.12
+        else:
+            z = f"(1+{MOTION_AMT:.3f}*(1-{k}))"       # 1.12 → 1.00
+        # cover → upscale by z(t) → center-crop back to the slot.
+        parts.append(
+            f"[{in_idx}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+            f"crop={W}:{H},setsar=1[illb{i}]"
+        )
+        parts.append(
+            f"[illb{i}]scale=w='2*ceil({W}*{z}/2)':h='2*ceil({H}*{z}/2)':eval=frame[illz{i}]"
+        )
+        # center offset is a pure function of t (avoids init-locked in_w/in_h).
+        # crop x/y evaluate per-frame by default — `eval` isn't a crop option.
+        parts.append(
+            f"[illz{i}]crop={W}:{H}:x='({W}*({z}-1))/2':y='({H}*({z}-1))/2',setsar=1[{out}]"
+        )
+    else:   # pan_left / pan_right — horizontal slide, height locked to the slot.
+        cw = int(round(W * (1 + MOTION_AMT) / 2) * 2)   # oversized canvas width (even)
+        travel = cw - W
+        x = f"({travel}*{k})" if motion == "pan_right" else f"({travel}*(1-{k}))"
+        parts.append(
+            f"[{in_idx}:v]scale={cw}:{H}:force_original_aspect_ratio=increase,"
+            f"crop={cw}:{H},setsar=1[illc{i}]"
+        )
+        parts.append(
+            f"[illc{i}]crop={W}:{H}:x='{x}':y=0,setsar=1[{out}]"
+        )
+    return parts
 
 
 # ───────────────────────── soundboard SFX (audio mix) ─────────────────────────
@@ -582,9 +660,19 @@ def render(
     render_start: Optional[float] = None,
     render_end: Optional[float] = None,
     sfx: Optional[list[SfxPlacement]] = None,
+    top_eighths: float = 3.0,
+    fullscreen_windows: Optional[list[FullscreenWindow]] = None,
 ) -> dict:
     if not box:
         raise ValueError("box (top crop) is required with >= 1 keyframe")
+    fullscreen_windows = fullscreen_windows or []
+
+    # Selectable top/bottom split: the video crop fills `top_eighths`/8 of the
+    # height (3, 3.5 or 4), the illustration slot takes the rest. Both even for
+    # yuv420. Default 3/8 = the original 720/1200 layout.
+    top_eighths = min(4.0, max(3.0, float(top_eighths or 3.0)))
+    top_h = int(round(OUT_H * top_eighths / 8 / 2)) * 2
+    bottom_h = OUT_H - top_h
 
     rs = max(0.0, float(render_start)) if render_start is not None else 0.0
     re_ = float(render_end) if render_end is not None else None
@@ -596,6 +684,7 @@ def render(
         words = _shift_words(words, rs, re_)
         illustrations = _shift_illustrations(illustrations, rs, re_)
         sfx = _shift_sfx(sfx, rs, re_)
+        fullscreen_windows = _shift_fullscreen(fullscreen_windows, rs, re_)
 
     # Defense-in-depth: clamp the box inside the source frame (no-op for valid
     # boxes; prevents an off-frame crop from crashing ffmpeg).
@@ -628,25 +717,36 @@ def render(
 
     # Build ASS captions — caption always sits at the top/bottom slot boundary.
     groups = _group_words(words) if words else []
-    ass_text = _build_ass(groups, caption_font, caption_size, TOP_H)
+    ass_text = _build_ass(groups, caption_font, caption_size, top_h)
     ass_path = source_path.parent / f"{job_id}.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
 
     # ── filter graph ──
     parts: list[str] = []
+    # "Full-screen" windows: the video fills the whole 9:16 frame (no illustration).
+    # That needs a SECOND consumer of the source, so split 0:v up front.
+    fs = [w for w in fullscreen_windows if (float(w.t_end) - float(w.t_start)) > 0.02]
+    top_src = "0:v"
+    if fs:
+        parts.append("[0:v]split=2[v_main][v_full]")
+        top_src = "v_main"
     # Top slot: the video crop (single bbox, cover/blur per keyframe).
-    parts.extend(_crop_chain("0:v", box, OUT_W, TOP_H, "top"))
+    parts.extend(_crop_chain(top_src, box, OUT_W, top_h, "top"))
 
     # Bottom slot: black base + each illustration overlaid during its window.
     # Input 0 = video; inputs 1..N = looped images (one per window).
-    parts.append(f"color=c=black:s={OUT_W}x{BOTTOM_H}:r=30:d={dur:.3f}[botbase]")
+    parts.append(f"color=c=black:s={OUT_W}x{bottom_h}:r=30:d={dur:.3f}[botbase]")
     last_bot = "botbase"
     for i, (_path, pick) in enumerate(img_inputs):
         in_idx = i + 1  # video is input 0
-        parts.append(
-            f"[{in_idx}:v]scale={OUT_W}:{BOTTOM_H}:force_original_aspect_ratio=increase,"
-            f"crop={OUT_W}:{BOTTOM_H},setsar=1[ill{i}]"
-        )
+        motion = (getattr(pick, "motion", "none") or "none").lower()
+        if motion in ("zoom_in", "zoom_out", "pan_left", "pan_right"):
+            parts.extend(_ill_motion_chain(in_idx, i, pick, motion, bottom_h))
+        else:
+            parts.append(
+                f"[{in_idx}:v]scale={OUT_W}:{bottom_h}:force_original_aspect_ratio=increase,"
+                f"crop={OUT_W}:{bottom_h},setsar=1[ill{i}]"
+            )
         nxt = f"b{i}"
         parts.append(
             f"[{last_bot}][ill{i}]overlay=enable='between(t,{_fmt_num(pick.t_start)},{_fmt_num(pick.t_end)})':eof_action=pass[{nxt}]"
@@ -656,6 +756,24 @@ def render(
 
     parts.append("[top][bot]vstack=inputs=2:shortest=1[stacked]")
     last = "stacked"
+
+    # Full-screen windows: build a full-frame 1080×1920 crop of the SAME box and
+    # overlay it (opaque) over the split composite during each window. Captions are
+    # burned afterwards, so they still sit on top during full-screen stretches.
+    if fs:
+        parts.extend(_crop_chain("v_full", box, OUT_W, OUT_H, "vfull"))
+        # A filter output is consumable once — split vfull into one copy per window.
+        if len(fs) > 1:
+            labels = [f"vfull{j}" for j in range(len(fs))]
+            parts.append(f"[vfull]split={len(fs)}" + "".join(f"[{l}]" for l in labels))
+        else:
+            labels = ["vfull"]
+        for j, w in enumerate(fs):
+            nxt = f"fs{j}"
+            parts.append(
+                f"[{last}][{labels[j]}]overlay=enable='between(t,{_fmt_num(w.t_start)},{_fmt_num(w.t_end)})'[{nxt}]"
+            )
+            last = nxt
 
     # Soundboard SFX → audio mix (only when sounds are placed). SFX inputs come
     # AFTER the video (0) and the image inputs (1..N), so they start at 1+N.
@@ -700,8 +818,13 @@ def render(
     # pass lets the black base show before/after each image's window).
     for path, pick in img_inputs:
         win = max(0.1, float(pick.t_end) - float(pick.t_start))
+        # A still needs only 2fps — but a Ken Burns image must feed 30fps or the
+        # per-frame scale/crop motion would only step at 2fps (choppy).
+        moving = (getattr(pick, "motion", "none") or "none").lower() in (
+            "zoom_in", "zoom_out", "pan_left", "pan_right")
+        fr = "30" if moving else "2"
         cmd += ["-itsoffset", f"{float(pick.t_start):.3f}", "-loop", "1",
-                "-framerate", "2", "-t", f"{win:.3f}", "-i", str(path)]
+                "-framerate", fr, "-t", f"{win:.3f}", "-i", str(path)]
 
     # SFX inputs come after the video + image inputs (indices line up with
     # first_sfx_index = 1 + len(img_inputs) used when building the audio graph).

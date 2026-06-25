@@ -91,7 +91,7 @@ _box_durations: list = []       # recent boxing wall-times (s), for the ETA esti
 # jobs table = these scalar columns (box keyframes live in the keyframes table).
 _JOB_COLS = [
     "key", "id", "url", "start", "end", "title", "description",
-    "prompt1", "prompt2", "context", "segment_seconds", "padding",
+    "prompt1", "prompt2", "context", "segment_seconds", "top_eighths", "padding",
     "step_seconds", "room_id", "director", "diarization", "transcript", "expect",
     "status", "message", "job_id", "video_path",
     "width", "height", "duration", "output_path", "filename",
@@ -133,7 +133,7 @@ def _init_db() -> None:
             key TEXT UNIQUE NOT NULL,
             id TEXT, url TEXT, start TEXT, "end" TEXT, title TEXT, description TEXT,
             prompt1 TEXT, prompt2 TEXT, context TEXT,
-            segment_seconds REAL, padding REAL, step_seconds REAL, room_id INTEGER,
+            segment_seconds REAL, top_eighths REAL, padding REAL, step_seconds REAL, room_id INTEGER,
             director INTEGER, diarization INTEGER, transcript TEXT, expect TEXT,
             status TEXT, message TEXT, job_id TEXT, video_path TEXT,
             width INTEGER, height INTEGER, duration REAL,
@@ -148,6 +148,7 @@ def _init_db() -> None:
                     "ALTER TABLE jobs ADD COLUMN diarization INTEGER",
                     "ALTER TABLE jobs ADD COLUMN transcript TEXT",
                     "ALTER TABLE jobs ADD COLUMN expect TEXT",
+                    "ALTER TABLE jobs ADD COLUMN top_eighths REAL",
                     "ALTER TABLE keyframes ADD COLUMN dynamic INTEGER",
                     "ALTER TABLE keyframes ADD COLUMN moving INTEGER"):
             try:
@@ -267,7 +268,7 @@ def _to_float(v) -> Optional[float]:
 
 
 def _clip_to_job(url: str, clip: dict, default_context: str = "",
-                 default_director: bool = False, default_diar: bool = False,
+                 default_director: bool = True, default_diar: bool = True,
                  default_expect: str = "") -> dict:
     cid = str(clip.get("id") or uuid.uuid4().hex[:8])
     return {
@@ -288,6 +289,10 @@ def _clip_to_job(url: str, clip: dict, default_context: str = "",
         # the Illustration step so the user just picks. Ignored by clipper.
         "segment_seconds": _to_float(clip.get("segment_seconds")
                                      or clip.get("seg_seconds") or clip.get("jeda")),
+        # Optional per-clip top/bottom split (illustrator only): how many eighths
+        # of the height the video crop fills (3, 3.5 or 4). None → 3/8 default.
+        "top_eighths": _to_float(clip.get("top_eighths")
+                                 or clip.get("layout") or clip.get("top_slot")),
         # Optional per-clip auto-box padding (fraction per side). 0 = tight box
         # hugging the subject; None → the autobox default (0.05).
         "padding": _to_float(clip.get("padding") if clip.get("padding") is not None
@@ -331,8 +336,8 @@ def import_text(content: str, room_id=None) -> dict:
     default_context = str(data.pop("_context", "") or "")
     # File-level defaults for the Phase 2/3 toggles (per-clip "director"/"diarization"
     # override these). underscore = clearly not a URL, popped before the URL loop.
-    default_director = bool(data.pop("_director", False))
-    default_diar = bool(data.pop("_diarization", False))
+    default_director = bool(data.pop("_director", True))
+    default_diar = bool(data.pop("_diarization", True))
     default_expect = str(data.pop("_expect", "") or "")
     rid = int(room_id) if room_id not in (None, "", "all") else None
 
@@ -428,7 +433,8 @@ def get_job(key: str) -> Optional[dict]:
 def save_job(key: str, patch: dict) -> Optional[dict]:
     """Persist edits from the editor (title + keyframes). Only known fields."""
     allowed = {k: patch[k] for k in
-               ("title", "box1", "box2", "description", "context", "prompt1", "prompt2")
+               ("title", "box1", "box2", "description", "context", "prompt1", "prompt2",
+                "top_eighths")
                if k in patch}
     if not allowed:
         return _find(key)

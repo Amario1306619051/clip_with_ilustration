@@ -111,6 +111,8 @@ def api_render(req: RenderRequest):
             render_start=req.render_start,
             render_end=req.render_end,
             sfx=req.sfx,
+            top_eighths=req.top_eighths,
+            fullscreen_windows=req.fullscreen_windows,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
