@@ -61,6 +61,12 @@ const state = {
   segments: [],     // plan result; each gets .picked (url or null)
   segSeconds: 5,
   topEighths: 3,    // top video slot height in eighths (3 · 3.5 · 4); bottom = rest
+  keep: [],         // Trim: keep-windows {start,end} (everything else cut at render)
+  keepA: null,      // pending in-point while marking A→B
+  keepDrag: null,   // drag state for a trim bar
+  subclips: [],     // sub-clips: one source → many exports [{name,start,end,snap}]
+  activeSub: null,  // index of the sub-clip currently loaded into the editor
+  subDrag: null,    // drag state for a sub-clip range bar
 
   activeBox: null,  // null | 1
   currentTime: 0,
@@ -133,6 +139,8 @@ $('#btn-download').addEventListener('click', async () => {
     state.autoRange = { start: 0, end: r.duration };
     state.srcW = r.width; state.srcH = r.height;
     state.sfx = [];                // placements are per-clip
+    state.keep = []; state.keepA = null;   // trim windows are per-clip
+    state.subclips = []; state.activeSub = null;   // sub-clips are per-session
     state.autoObs = '';            // no model observation for an ad-hoc clip
     if ($('#ab-context')) $('#ab-context').value = '';   // context is per-clip
     state.activeQueueKey = null;   // ad-hoc download — not editing a queue job
@@ -164,6 +172,7 @@ video.addEventListener('loadedmetadata', () => {
   $('#time-dur').textContent = fmtTime(video.duration || 0);
   resizeOverlay();
   drawOverlay();
+  try { renderTrimTrack(); renderSubclips(); } catch (e) { /* not ready */ }
 });
 video.addEventListener('timeupdate', () => {
   state.currentTime = video.currentTime;
@@ -457,10 +466,35 @@ $('#top-eighths') && $('#top-eighths').addEventListener('change', (e) => {
   applyTopEighths(e.target.value);
   autosaveQueue();
 });
+$('#cap-pos') && $('#cap-pos').addEventListener('change', () => drawPreview($('#preview')));
 $('#cuts-1').addEventListener('mousedown', onCutBarDown);
 $('#cuts-1').addEventListener('dblclick', onCutBarDblClick);
 window.addEventListener('mousemove', onCutDragMove);
 window.addEventListener('mouseup', () => { if (state.cutDrag) { state.cutDrag = null; refreshKfUI(); } });
+
+// Trim (keep-windows)
+$('#btn-trim-a') && $('#btn-trim-a').addEventListener('click', setKeepA);
+$('#btn-trim-b') && $('#btn-trim-b').addEventListener('click', setKeepB);
+$('#btn-trim-here') && $('#btn-trim-here').addEventListener('click', addKeepHere);
+$('#btn-trim-clear') && $('#btn-trim-clear').addEventListener('click', clearKeep);
+$('#trim-track') && $('#trim-track').addEventListener('mousedown', onTrimTrackDown);
+$('#trim-track') && $('#trim-track').addEventListener('dblclick', onTrimDblClick);
+window.addEventListener('mousemove', onTrimDragMove);
+window.addEventListener('mouseup', () => { if (state.keepDrag) state.keepDrag = null; });
+
+// Sub-clips (one source → many exports)
+$('#btn-sub-add') && $('#btn-sub-add').addEventListener('click', addSubclip);
+$('#btn-sub-update') && $('#btn-sub-update').addEventListener('click', updateSubclip);
+$('#btn-sub-render') && $('#btn-sub-render').addEventListener('click', renderAllSubclips);
+$('#btn-sub-start') && $('#btn-sub-start').addEventListener('click', () => setSubRange('start', state.currentTime || 0));
+$('#btn-sub-end') && $('#btn-sub-end').addEventListener('click', () => setSubRange('end', state.currentTime || 0));
+$('#subclip-track') && $('#subclip-track').addEventListener('mousedown', onSubTrackDown);
+window.addEventListener('mousemove', onSubDragMove);
+window.addEventListener('mouseup', () => {
+  const d = state.subDrag; if (!d) return;
+  state.subDrag = null;
+  if (!d.moved) loadSubclip(d.i); else renderSubclips();
+});
 
 // ───────────────────────── undo / redo (editing history) ─────────────────────
 // Snapshots the crop keyframes (incl. cuts) + SFX placements; restores on Ctrl+Z /
@@ -517,6 +551,8 @@ function updateUndoButtons() {
 function renderEverything() {
   try { refreshKfUI(); } catch (e) { /* crop UI not ready */ }
   try { renderSfxList(); } catch (e) { /* sound UI not ready */ }
+  try { renderTrimTrack(); } catch (e) { /* trim UI not ready */ }
+  try { renderSubclips(); updateSubRangeLbl(); } catch (e) { /* sub-clip UI not ready */ }
 }
 const _undoBtn = document.getElementById('btn-undo');
 const _redoBtn = document.getElementById('btn-redo');
@@ -839,10 +875,21 @@ function drawPreview(canvas) {
     ctx.fillText('illustration', PREVIEW_W / 2, tph + (PREVIEW_H - tph) / 2);
     ctx.textAlign = 'left';
   }
-  // slot divider line (where caption sits)
+  // slot divider line
   ctx.strokeStyle = 'rgba(232,255,58,0.4)';
   ctx.lineWidth = 1;
   ctx.beginPath(); ctx.moveTo(0, tph); ctx.lineTo(PREVIEW_W, tph); ctx.stroke();
+
+  // caption position marker (top / middle=boundary / bottom)
+  const cp = ($('#cap-pos') && $('#cap-pos').value) || 'middle';
+  const capY = cp === 'top' ? PREVIEW_H * 0.13 : cp === 'bottom' ? PREVIEW_H * 0.87 : tph;
+  ctx.fillStyle = 'rgba(232,255,58,0.9)';
+  ctx.font = 'bold 11px Anton, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = 3;
+  ctx.strokeText('CAPTION', PREVIEW_W / 2, capY);
+  ctx.fillText('CAPTION', PREVIEW_W / 2, capY);
+  ctx.textAlign = 'left';
 }
 
 // scale-cover (or contain+blur) src region into dest rect
@@ -1012,6 +1059,268 @@ function onIllDragMove(e) {
   renderIllBars();
 }
 
+// ── Trim (keep-windows) — mark windows to KEEP; the rest is cut at render ──
+const TRIM_MIN = 0.2;
+function renderTrimTrack() {
+  const host = $('#trim-track'); if (!host) return;
+  const dur = cutDur() || 1;
+  if (!state.keep.length) { host.innerHTML = '<span class="cut-lane-empty">— whole clip kept (Set A → Set B to cut the rest) —</span>'; return; }
+  host.innerHTML = state.keep.map((w, i) => {
+    const left = (w.start / dur) * 100;
+    const width = Math.max(0.8, ((w.end - w.start) / dur) * 100);
+    return `<div class="cut-bar keep" data-i="${i}" style="left:${left}%;width:${width}%" title="Keep ${w.start.toFixed(1)}–${w.end.toFixed(1)}s — drag to move, edges to resize, double-click to remove">`
+      + `<span class="cut-bar-h l"></span><span class="cut-bar-lbl">${(w.end - w.start).toFixed(1)}s</span><span class="cut-bar-h r"></span></div>`;
+  }).join('');
+}
+function addKeep(a, b) {
+  a = Math.max(0, Math.min(a, b)); b = Math.max(a, b);
+  if (b - a < TRIM_MIN) { setStatus($('#trim-status'), 'Window too short.', 'err'); return false; }
+  state.keep.push({ start: +a.toFixed(2), end: +b.toFixed(2) });
+  state.keep.sort((x, y) => x.start - y.start);
+  renderTrimTrack();
+  setStatus($('#trim-status'), `Keep ${a.toFixed(1)}–${b.toFixed(1)}s added (${state.keep.length} window${state.keep.length > 1 ? 's' : ''}).`, 'ok');
+  return true;
+}
+function setKeepA() { state.keepA = state.currentTime || 0; setStatus($('#trim-status'), `A @ ${state.keepA.toFixed(2)}s — scrub to the end, then Set B.`, 'ok'); }
+function setKeepB() {
+  if (state.keepA == null) { setStatus($('#trim-status'), 'Set A first.', 'err'); return; }
+  if (addKeep(state.keepA, state.currentTime || 0)) state.keepA = null;
+}
+function addKeepHere() { const t = state.currentTime || 0; addKeep(t, Math.min(t + 3, cutDur())); }
+function clearKeep() { state.keep = []; state.keepA = null; renderTrimTrack(); setStatus($('#trim-status'), 'Cleared — whole clip kept.', 'ok'); }
+function onTrimTrackDown(e) {
+  const bar = e.target.closest('.cut-bar'); if (!bar) return;
+  e.preventDefault();
+  const i = +bar.dataset.i; const w = state.keep[i]; if (!w) return;
+  const rect = $('#trim-track').getBoundingClientRect();
+  const isH = e.target.classList.contains('cut-bar-h');
+  const mode = isH && e.target.classList.contains('l') ? 'resize-l'
+             : isH && e.target.classList.contains('r') ? 'resize-r' : 'move';
+  state.keepDrag = { i, mode, startX: e.clientX, trackW: rect.width, a: w.start, b: w.end };
+}
+function onTrimDragMove(e) {
+  const d = state.keepDrag; if (!d) return;
+  const dur = cutDur() || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const w = state.keep[d.i]; if (!w) return;
+  if (d.mode === 'move') { const len = d.b - d.a; const ns = Math.max(0, Math.min(d.a + dt, dur - len)); w.start = +ns.toFixed(2); w.end = +(ns + len).toFixed(2); }
+  else if (d.mode === 'resize-l') { w.start = +Math.max(0, Math.min(d.a + dt, w.end - TRIM_MIN)).toFixed(2); }
+  else { w.end = +Math.max(w.start + TRIM_MIN, Math.min(d.b + dt, dur)).toFixed(2); }
+  renderTrimTrack();
+}
+function onTrimDblClick(e) {
+  const bar = e.target.closest('.cut-bar'); if (!bar) return;
+  state.keep.splice(+bar.dataset.i, 1); renderTrimTrack();
+}
+
+// ═══════════════════ Sub-clips: one source → many exports ═══════════════════
+// Each sub-clip is an independent SNAPSHOT of the whole editor (crop box, the
+// picked illustrations + on/off, split, motion, caption, sfx, trim) + a
+// [start,end] export range. "Render all" renders each to its own file.
+function subRange() {
+  const a = parseFloat($('#rd-start') ? $('#rd-start').value : '');
+  const b = parseFloat($('#rd-end') ? $('#rd-end').value : '');
+  return { start: isNaN(a) ? null : a, end: isNaN(b) ? null : b };
+}
+function subSnapshot() {
+  return JSON.parse(JSON.stringify({
+    box: state.box || [],
+    segments: (state.segments || []).map((s) => ({
+      t_start: s.t_start, t_end: s.t_end, picked: s.picked || null,
+      off: !!s.off, query: s.query || '', candidates: s.candidates || [],
+    })),
+    topEighths: state.topEighths || 3,
+    motion: ($('#ill-motion') && $('#ill-motion').value) || 'auto',
+    caption: {
+      font: ($('#cap-font') && $('#cap-font').value) || 'Anton',
+      size: Number($('#cap-size') && $('#cap-size').value) || 64,
+      pos: ($('#cap-pos') && $('#cap-pos').value) || 'middle',
+    },
+    sfx: state.sfx || [],
+    keep: state.keep || [],
+  }));
+}
+function subApply(snap) {
+  if (!snap) return;
+  const c = (v) => JSON.parse(JSON.stringify(v));
+  state.box = c(snap.box || []);
+  state.segments = (snap.segments || []).map((s) => {
+    const seg = { ...s, _img: null };
+    if (seg.picked) { const im = new Image(); im.src = seg.picked; seg._img = im; }   // reload for preview
+    return seg;
+  });
+  state.sfx = c(snap.sfx || []);
+  state.keep = c(snap.keep || []);
+  applyTopEighths(snap.topEighths || 3);
+  if ($('#ill-motion') && snap.motion) $('#ill-motion').value = snap.motion;
+  if ($('#cap-font') && snap.caption) $('#cap-font').value = snap.caption.font;
+  if ($('#cap-size') && snap.caption) $('#cap-size').value = snap.caption.size;
+  if ($('#cap-pos') && snap.caption && snap.caption.pos) $('#cap-pos').value = snap.caption.pos;
+  refreshKfUI();
+  renderSegments();
+  renderTrimTrack();
+  drawPreview($('#preview'));
+}
+
+function addSubclip() {
+  if (!state.jobId) { setStatus($('#sub-status'), 'Load a clip first.', 'err'); return; }
+  const dur = cutDur();
+  const r = subRange();
+  let start = r.start, end = r.end;
+  if (start == null) start = 0;
+  if (end == null) end = Math.min(dur, start + 30);
+  const base = ($('#f-title') && $('#f-title').value || 'clip').trim() || 'clip';
+  state.subclips.push({ name: `${base}_${state.subclips.length + 1}`, start: +start.toFixed(2), end: +end.toFixed(2), snap: subSnapshot() });
+  state.activeSub = state.subclips.length - 1;
+  renderSubclips();
+  setStatus($('#sub-status'), `Sub-clip ${state.subclips.length} saved (its own crop + illustrations + caption). Re-set up for the next, then Add again.`, 'ok');
+}
+function updateSubclip() {
+  const i = state.activeSub;
+  if (i == null || !state.subclips[i]) { addSubclip(); return; }
+  const sc = state.subclips[i];
+  sc.snap = subSnapshot();
+  const r = subRange();
+  if (r.start != null) sc.start = +r.start.toFixed(2);
+  if (r.end != null) sc.end = +r.end.toFixed(2);
+  renderSubclips();
+  setStatus($('#sub-status'), `Updated "${sc.name}".`, 'ok');
+}
+function loadSubclip(i) {
+  const sc = state.subclips[i]; if (!sc) return;
+  subApply(sc.snap);
+  if ($('#rd-start')) $('#rd-start').value = sc.start;
+  if ($('#rd-end')) $('#rd-end').value = sc.end;
+  if (video && video.duration) video.currentTime = Math.min(sc.start, video.duration - 0.05);
+  state.activeSub = i;
+  renderSubclips();
+  updateSubRangeLbl();
+  setStatus($('#sub-status'), `Loaded "${sc.name}". Tweak it, then ⤓ Save edits.`, 'ok');
+}
+function deleteSubclip(i) {
+  state.subclips.splice(i, 1);
+  if (state.activeSub === i) state.activeSub = null;
+  else if (state.activeSub != null && state.activeSub > i) state.activeSub--;
+  renderSubclips();
+}
+function renderSubclips() { renderSubBar(); renderSubList(); }
+function renderSubBar() {
+  const track = $('#subclip-track'); if (!track) return;
+  const dur = cutDur() || 1;
+  track.innerHTML = state.subclips.map((sc, i) => {
+    const left = (sc.start / dur) * 100;
+    const width = Math.max(2, ((sc.end - sc.start) / dur) * 100);
+    const active = i === state.activeSub ? ' active' : '';
+    return `<div class="cut-bar sub${active}" data-i="${i}" style="left:${left}%;width:${width}%" title="${sc.name}: ${sc.start.toFixed(1)}–${sc.end.toFixed(1)}s — click to load, drag to move, edges to resize">`
+      + `<span class="cut-bar-h l"></span><span class="cut-bar-lbl">${i + 1}. ${sc.name}</span><span class="cut-bar-h r"></span></div>`;
+  }).join('') || '<span class="cut-lane-empty">— set up a moment, set a range, then + Add sub-clip —</span>';
+}
+function renderSubList() {
+  const ol = $('#subclip-list'); if (!ol) return;
+  ol.innerHTML = state.subclips.map((sc, i) => `
+    <li class="${i === state.activeSub ? 'active' : ''}">
+      <input class="subclip-name" data-i="${i}" value="${(sc.name || '').replace(/"/g, '')}" title="output filename">
+      <span class="subclip-when">${sc.start.toFixed(1)}–${sc.end.toFixed(1)}s</span>
+      <button class="sub-load" data-load="${i}" title="load into the editor">✎</button>
+      <button class="sub-del" data-del="${i}" title="delete">×</button>
+    </li>`).join('');
+  ol.querySelectorAll('.subclip-name').forEach((inp) => inp.addEventListener('change', () => {
+    const sc = state.subclips[+inp.dataset.i]; if (sc) { sc.name = inp.value.trim() || sc.name; renderSubBar(); }
+  }));
+  ol.querySelectorAll('[data-load]').forEach((b) => b.addEventListener('click', () => loadSubclip(+b.dataset.load)));
+  ol.querySelectorAll('[data-del]').forEach((b) => b.addEventListener('click', () => deleteSubclip(+b.dataset.del)));
+}
+function setSubRange(which, t) {
+  t = +(+t).toFixed(2);
+  if (which === 'start' && $('#rd-start')) $('#rd-start').value = t;
+  else if ($('#rd-end')) $('#rd-end').value = t;
+  updateSubRangeLbl();
+  setStatus($('#sub-status'), `Range ${which} = ${t}s. Set both, then + Add sub-clip.`, 'ok');
+}
+function updateSubRangeLbl() {
+  const el = $('#subclip-range-lbl'); if (!el) return;
+  const r = subRange();
+  el.textContent = (r.start == null && r.end == null) ? 'range: full clip'
+    : `range: ${r.start == null ? '0' : r.start.toFixed(1)}–${r.end == null ? 'end' : r.end.toFixed(1)}s`;
+}
+function onSubTrackDown(e) {
+  const bar = e.target.closest('.cut-bar'); if (!bar) return;
+  e.preventDefault();
+  const i = +bar.dataset.i; const sc = state.subclips[i]; if (!sc) return;
+  const rect = $('#subclip-track').getBoundingClientRect();
+  const isH = e.target.classList.contains('cut-bar-h');
+  const mode = isH && e.target.classList.contains('l') ? 'resize-l'
+             : isH && e.target.classList.contains('r') ? 'resize-r' : 'move';
+  state.subDrag = { i, mode, startX: e.clientX, trackW: rect.width, a: sc.start, b: sc.end, moved: false };
+}
+function onSubDragMove(e) {
+  const d = state.subDrag; if (!d) return;
+  if (Math.abs(e.clientX - d.startX) > 3) d.moved = true;
+  const dur = cutDur() || 1;
+  const dt = ((e.clientX - d.startX) / d.trackW) * dur;
+  const sc = state.subclips[d.i]; if (!sc) return;
+  if (d.mode === 'move') { const len = d.b - d.a; const ns = Math.max(0, Math.min(d.a + dt, dur - len)); sc.start = +ns.toFixed(2); sc.end = +(ns + len).toFixed(2); }
+  else if (d.mode === 'resize-l') { sc.start = +Math.max(0, Math.min(d.a + dt, sc.end - 0.2)).toFixed(2); }
+  else { sc.end = +Math.max(sc.start + 0.2, Math.min(d.b + dt, dur)).toFixed(2); }
+  renderSubBar();
+}
+const SUB_MOTION_CYCLE = ['zoom_in', 'pan_right', 'zoom_out', 'pan_left'];
+function buildSubRenderBody(sc) {
+  const s = sc.snap;
+  const mode = s.motion || 'auto';
+  const picks = (s.segments || []).filter((seg) => seg.picked && !seg.off);
+  const illustrations = picks.map((seg, i) => ({
+    t_start: seg.t_start, t_end: seg.t_end, url: seg.picked,
+    motion: mode === 'auto' ? SUB_MOTION_CYCLE[i % SUB_MOTION_CYCLE.length] : mode,
+  }));
+  const fullscreen = (s.segments || []).filter((seg) => seg.off).map((seg) => ({ t_start: seg.t_start, t_end: seg.t_end }));
+  return {
+    job_id: state.jobId,
+    title: sc.name,
+    box: s.box || [],
+    illustrations,
+    fullscreen_windows: fullscreen,
+    keep_segments: (s.keep || []).map((w) => ({ start: w.start, end: w.end })),
+    words: state.words || [],
+    caption_font: (s.caption && s.caption.font) || 'Anton',
+    caption_size: (s.caption && s.caption.size) || 64,
+    caption_pos: (s.caption && s.caption.pos) || 'middle',
+    cleanup: false,
+    render_start: sc.start,
+    render_end: sc.end,
+    sfx: s.sfx || [],
+    top_eighths: s.topEighths || 3,
+  };
+}
+async function renderAllSubclips() {
+  if (!state.subclips.length) { setStatus($('#sub-status'), 'No sub-clips — add some first.', 'err'); return; }
+  const names = state.subclips.map((s) => s.name);
+  if (new Set(names).size !== names.length) { setStatus($('#sub-status'), 'Sub-clip names must be unique (they become filenames).', 'err'); return; }
+  const btn = $('#btn-sub-render'); if (btn) btn.disabled = true;
+  const out = [];
+  try {
+    for (let i = 0; i < state.subclips.length; i++) {
+      const sc = state.subclips[i];
+      setStatus($('#sub-status'), `Rendering ${i + 1}/${state.subclips.length}: ${sc.name}…`);
+      try {
+        const r = await api('render', buildSubRenderBody(sc));
+        out.push({ name: sc.name, filename: r.filename, output_path: r.output_path });
+      } catch (e) {
+        out.push({ name: sc.name, error: e.message });
+      }
+      renderSubResults(out);
+    }
+    const ok = out.filter((o) => !o.error).length;
+    setStatus($('#sub-status'), `Done — ${ok}/${state.subclips.length} sub-clips rendered.`, ok ? 'ok' : 'err');
+  } finally { if (btn) btn.disabled = false; }
+}
+function renderSubResults(out) {
+  const box = $('#subclip-results'); if (!box) return;
+  box.innerHTML = out.map((o) => o.error
+    ? `<li class="err">${o.name}: ${o.error}</li>`
+    : `<li>${o.name} — <a href="${o.output_path}" download>↓ ${o.filename}</a></li>`).join('');
+}
+
 function renderSegments() {
   const host = $('#ill-segments');
   if (!state.segments.length) { host.innerHTML = '<div class="muted">Not generated yet.</div>'; renderIllBars(); return; }
@@ -1112,9 +1421,11 @@ async function doRender(withCaption) {
       box: state.box,
       illustrations: buildIllustrations(),
       fullscreen_windows: buildFullscreen(),
+      keep_segments: state.keep.map((w) => ({ start: w.start, end: w.end })),
       words: withCaption ? state.words : [],
       caption_font: $('#cap-font').value,
       caption_size: Number($('#cap-size').value) || 64,
+      caption_pos: ($('#cap-pos') && $('#cap-pos').value) || 'middle',
       cleanup: false,
       render_start: rs === '' ? null : Number(rs),
       render_end: re === '' ? null : Number(re),
@@ -1620,6 +1931,8 @@ async function openQueueJob(key) {
   state.box = job.box1 || [];
   state.words = [];
   state.sfx = [];                  // placements are per-clip
+  state.keep = []; state.keepA = null;            // trim windows are per-clip
+  state.subclips = []; state.activeSub = null;    // sub-clips are per-session
   state.currentTime = 0;
   state.autoRange = { start: 0, end: job.duration };
   $('#f-url').value = job.url || '';

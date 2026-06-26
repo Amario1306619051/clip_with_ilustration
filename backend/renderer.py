@@ -7,7 +7,7 @@ from typing import Optional
 
 import illustrator
 import soundboard
-from models import FullscreenWindow, IllustrationPick, Keyframe, SfxPlacement, Word
+from models import FullscreenWindow, IllustrationPick, KeepSegment, Keyframe, SfxPlacement, Word
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -286,6 +286,29 @@ def _shift_fullscreen(windows: list[FullscreenWindow], start: float,
             continue
         out.append(FullscreenWindow(t_start=ns, t_end=ne))
     return out
+
+
+def _sanitize_keep(segs, dur: float):
+    """Normalize KeepSegment list → sorted, clamped, merged (a,b) tuples. Drops
+    sub-frame slivers and overlaps. Empty result = no trim (keep whole clip).
+    (Ported from clipper.)"""
+    raw = []
+    for s in segs or []:
+        a = float(getattr(s, "start", 0.0))
+        b = float(getattr(s, "end", 0.0))
+        a = max(0.0, a)
+        if dur and dur > 0:
+            b = min(b, dur)
+        if b - a > 0.02:
+            raw.append((a, b))
+    raw.sort()
+    merged: list[tuple[float, float]] = []
+    for a, b in raw:
+        if merged and a <= merged[-1][1] + 0.001:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
 
 
 # ── Ken Burns motion for the bottom-slot illustrations ─────────────────────
@@ -657,11 +680,13 @@ def render(
     words: list[Word],
     caption_font: str = "Bricolage Grotesque",
     caption_size: int = 64,
+    caption_pos: str = "middle",
     render_start: Optional[float] = None,
     render_end: Optional[float] = None,
     sfx: Optional[list[SfxPlacement]] = None,
     top_eighths: float = 3.0,
     fullscreen_windows: Optional[list[FullscreenWindow]] = None,
+    keep_segments: Optional[list[KeepSegment]] = None,
 ) -> dict:
     if not box:
         raise ValueError("box (top crop) is required with >= 1 keyframe")
@@ -678,6 +703,13 @@ def render(
     re_ = float(render_end) if render_end is not None else None
     if re_ is not None and re_ <= rs:
         re_, rs = None, 0.0
+
+    # Multi-segment KEEP trim — applied at the very END (compose whole clip, then
+    # select drops the gaps). When set it OVERRIDES the single sub-range so nothing
+    # is double-trimmed (rs/re_ → 0/None → the shifts below become no-ops).
+    keep = _sanitize_keep(keep_segments, 0.0)
+    if keep:
+        rs, re_ = 0.0, None
 
     if rs > 0 or re_ is not None:
         box = _shift_keyframes(box, rs)
@@ -717,7 +749,10 @@ def render(
 
     # Build ASS captions — caption always sits at the top/bottom slot boundary.
     groups = _group_words(words) if words else []
-    ass_text = _build_ass(groups, caption_font, caption_size, top_h)
+    # Caption vertical position: top / middle (slot boundary, default) / bottom.
+    _cp = (caption_pos or "middle").lower()
+    cap_y = int(OUT_H * 0.13) if _cp == "top" else int(OUT_H * 0.87) if _cp == "bottom" else top_h
+    ass_text = _build_ass(groups, caption_font, caption_size, cap_y)
     ass_path = source_path.parent / f"{job_id}.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
 
@@ -791,6 +826,18 @@ def render(
         vmap = "[outv]"
     else:
         vmap = f"[{last}]"
+
+    # Multi-segment KEEP trim — at the very END so all time-based composition above
+    # (crop / illustrations / fullscreen / caption / SFX) stays correct; then the
+    # gaps are dropped and the kept windows concatenated (select/aselect re-time).
+    if keep:
+        kexpr = "+".join(f"between(t,{_fmt_num(a)},{_fmt_num(b)})" for a, b in keep)
+        parts.append(f"{vmap}select='{kexpr}',setpts=N/FRAME_RATE/TB[vtrim]")
+        vmap = "[vtrim]"
+        abase = amap if amap else ("[0:a]" if _probe_has_audio(source_path) else None)
+        if abase:
+            parts.append(f"{abase}aselect='{kexpr}',asetpts=N/SR/TB[atrim]")
+            audio_map = "[atrim]"
 
     filter_complex = ";".join(parts)
 

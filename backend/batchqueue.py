@@ -32,6 +32,7 @@ owner asked for resumable batch progress. The rest of the app stays stateless.
 import ast
 import json
 import logging
+import os
 import sqlite3
 import threading
 import time
@@ -72,9 +73,15 @@ CAPTION_SIZE = 64
 # interleave their calls well below the 2×4 worst case in practice. Each stage
 # is its own pool of worker threads that atomically CLAIM jobs from its input
 # status, so no two grab the same clip.
-DOWNLOAD_WORKERS = 2
+DOWNLOAD_WORKERS = 1   # serialize yt-dlp — parallel downloads trip YouTube's bot-throttle
 BOXING_WORKERS = 3
 RENDER_WORKERS = 2
+# Space whole downloads apart (seconds) so a burst doesn't get rate-limited; a
+# throttled download is retried a few times before erroring (backoff = this gap).
+_DL_GAP = float(os.getenv("ILLUSTRATOR_DOWNLOAD_GAP_SECONDS", "15"))
+_MAX_DL_ATTEMPTS = 3
+_dl_attempts: dict = {}     # job key → failed download attempts (in-memory)
+_last_dl = [0.0]            # monotonic time of the last download start
 
 # Statuses (download and boxing are now SEPARATE stages so they parallelize):
 #   pending → downloading → downloaded → predicting → ready   (auto, on import)
@@ -444,6 +451,7 @@ def save_job(key: str, patch: dict) -> Optional[dict]:
 def retry_job(key: str) -> Optional[dict]:
     """Re-queue an errored job at the right phase: if it already downloaded +
     has boxes, the failure was the render → re-render; otherwise re-download/predict."""
+    _dl_attempts.pop(key, None)   # a manual retry gets a fresh set of auto-retries
     with _lock, _db() as conn:
         row = conn.execute("SELECT job_id FROM jobs WHERE key=?", (key,)).fetchone()
         if not row:
@@ -565,13 +573,29 @@ def _download_one(job: dict) -> None:
     through."""
     key = job["key"]
     if not job.get("job_id"):
+        # Space downloads apart so YouTube doesn't bot-throttle a burst.
+        wait = _DL_GAP - (time.monotonic() - _last_dl[0])
+        if wait > 0:
+            _update(key, message=f"waiting {int(wait)}s to avoid YouTube rate-limit…")
+            time.sleep(wait)
+        _last_dl[0] = time.monotonic()
         try:
             res = downloader.download(job["url"], job.get("start") or "00:00:00",
                                       job.get("end"), job.get("title") or "clip")
         except Exception as e:  # noqa: BLE001
-            log.warning("queue download failed (%s): %s", job["id"], e)
-            _update(key, status="error", message=f"download failed: {e}")
+            n = _dl_attempts.get(key, 0) + 1
+            _dl_attempts[key] = n
+            if n < _MAX_DL_ATTEMPTS:
+                # Transient throttle → re-queue; the inter-download gap is the backoff.
+                log.warning("download attempt %d/%d failed (%s): %s — re-queueing",
+                            n, _MAX_DL_ATTEMPTS, job["id"], e)
+                _update(key, status="pending",
+                        message=f"download retry {n}/{_MAX_DL_ATTEMPTS} (rate-limited)…")
+                return
+            log.warning("queue download failed (%s) after %d tries: %s", job["id"], n, e)
+            _update(key, status="error", message=f"download failed ({n} tries): {e}")
             return
+        _dl_attempts.pop(key, None)
         _update(key, job_id=res["job_id"], video_path=res["video_path"],
                 width=res["width"], height=res["height"], duration=res["duration"])
     _update(key, status="downloaded", message="downloaded — waiting to box…")

@@ -129,6 +129,14 @@ CAPTION_FONTS = [
 ]
 
 
+class KeepSegment(BaseModel):
+    """A [start, end] window to KEEP (seconds, clip time). At render, everything
+    OUTSIDE all kept windows is dropped and the kept parts concatenated — lets the
+    user cut out dead air / noisy stretches by marking what to keep (same as clipper)."""
+    start: float
+    end: float
+
+
 class FullscreenWindow(BaseModel):
     """A [start, end] window (seconds, clip time) where the VIDEO fills the whole
     9:16 frame — no illustration split. Outside these windows the layout is the
@@ -169,6 +177,7 @@ class RenderRequest(BaseModel):
     words: list[Word] = Field(default_factory=list)
     caption_font: str = "Anton"
     caption_size: int = 64
+    caption_pos: str = "middle"   # vertical caption position: "top" | "middle" | "bottom"
     cleanup: bool = False
     render_start: Optional[float] = None
     render_end: Optional[float] = None
@@ -179,6 +188,9 @@ class RenderRequest(BaseModel):
     top_eighths: float = 3.0
     # Windows where the video fills the whole 9:16 frame (no illustration).
     fullscreen_windows: list[FullscreenWindow] = Field(default_factory=list)
+    # Multi-segment KEEP trim: only these windows survive (concatenated), the rest
+    # is cut. Overrides render_start/render_end (same as clipper).
+    keep_segments: list[KeepSegment] = Field(default_factory=list)
 
 
 class RenderResponse(BaseModel):

@@ -7,7 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260623f">
+<link rel="stylesheet" href="style.css?v=20260625b">
 </head>
 <body>
 <header class="topbar">
@@ -162,6 +162,21 @@
           <button class="cut-btn" id="btn-split-1">Split crop here</button>
         </div>
 
+        <div class="cut-lanes" id="trim-lane-wrap">
+          <div class="cut-lane">
+            <span class="cut-lane-lbl" title="Trim: mark windows to KEEP — everything outside is cut and the kept parts are joined. Scrub the video, Set A then Set B. Drag a bar to move, edges to resize.">Trim</span>
+            <div class="cut-lane-track" id="trim-track"></div>
+          </div>
+        </div>
+        <div class="cut-controls">
+          <span class="cut-controls-lbl">Trim — keep only marked windows (the rest is cut):</span>
+          <button class="cut-btn" id="btn-trim-a">Set A (start)</button>
+          <button class="cut-btn" id="btn-trim-b">Set B (end)</button>
+          <button class="cut-btn" id="btn-trim-here">+ keep ~3s here</button>
+          <button class="cut-btn" id="btn-trim-clear">Clear</button>
+          <span class="status" id="trim-status"></span>
+        </div>
+
         <div class="autobox">
           <div class="autobox-head">
             <span class="autobox-title">✨ AI Auto-box</span>
@@ -223,6 +238,32 @@
       <button class="ghost" data-go="1">← Back</button>
       <button id="btn-continue" class="primary">Transcribe &amp; Continue →</button>
       <span class="status" id="tr-status"></span>
+    </div>
+
+    <div class="subclip-panel" id="subclip-panel">
+      <div class="subclip-head">
+        <h2>Sub-clips · many exports from this one source</h2>
+        <span class="hint">Set up a moment (crop · illustrations · caption), scrub the video above, hit <b>⟵ Start</b> / <b>End ⟶</b> at the playhead to set its range, then <b>+ Add sub-clip</b>. Each keeps its OWN setup and renders to its own file. Click a bar to load it back. (No sub-clips = the normal single render still works.)</span>
+      </div>
+      <div class="subclip-pv-btns">
+        <button id="btn-sub-start" class="cut-btn">⟵ Start @ playhead</button>
+        <span id="subclip-range-lbl" class="subclip-when">range: full clip</span>
+        <button id="btn-sub-end" class="cut-btn">End @ playhead ⟶</button>
+      </div>
+      <div class="cut-lanes">
+        <div class="cut-lane">
+          <span class="cut-lane-lbl">Sub-clips</span>
+          <div class="cut-lane-track" id="subclip-track"></div>
+        </div>
+      </div>
+      <div class="subclip-controls">
+        <button id="btn-sub-add" class="primary small">+ Add sub-clip</button>
+        <button id="btn-sub-update" class="ghost small" title="Save the current setup into the selected sub-clip">⤓ Save edits to selected</button>
+        <button id="btn-sub-render" class="primary small">🎬 Render all sub-clips</button>
+        <span class="status" id="sub-status"></span>
+      </div>
+      <ul class="subclip-list" id="subclip-list"></ul>
+      <ul class="subclip-results" id="subclip-results"></ul>
     </div>
   </section>
 
@@ -309,6 +350,14 @@
           <label>
             <span>Caption Size</span>
             <input type="number" id="cap-size" value="64" min="24" max="160">
+          </label>
+          <label>
+            <span>Caption Position</span>
+            <select id="cap-pos">
+              <option value="middle" selected>Middle (slot boundary)</option>
+              <option value="top">Top</option>
+              <option value="bottom">Bottom</option>
+            </select>
           </label>
         </div>
       </div>
@@ -501,6 +550,6 @@
 
 </div>
 
-<script src="app.js?v=20260623f"></script>
+<script src="app.js?v=20260625b"></script>
 </body>
 </html>

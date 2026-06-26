@@ -616,6 +616,25 @@ kbd {
 .cut-bar.vfull {
   background: rgba(255,157,46,.28); border: 1px solid #ff9d2e; cursor: move;
 }
+/* Trim keep-window — green. Sub-clip range — accent yellow. */
+.cut-bar.keep { background: rgba(70,211,105,.24); border: 1px solid #46d369; cursor: move; }
+.cut-bar.sub { background: rgba(232,255,58,.20); border: 1px solid #e8ff3a; cursor: move; }
+.cut-bar.sub.active { background: rgba(232,255,58,.38); box-shadow: 0 0 0 1px #e8ff3a inset; }
+/* Sub-clip panel */
+.subclip-panel { margin-top: 18px; background: var(--bg-elev, #181820); border: 1px solid var(--border, #2a2a33); border-radius: 8px; padding: 14px 16px; }
+.subclip-head h2 { margin: 0 0 4px; font-size: 15px; }
+.subclip-pv-btns { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0 4px; }
+.subclip-when { font-size: 11px; color: var(--text-mute, #8a8a99); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.subclip-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+.subclip-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.subclip-list li { display: flex; gap: 8px; align-items: center; padding: 6px 8px; background: var(--bg-elev-2, #202028); border: 1px solid var(--border, #2a2a33); border-radius: 6px; }
+.subclip-list li.active { border-color: #e8ff3a; }
+.subclip-name { flex: 1; min-width: 80px; background: var(--bg, #111); border: 1px solid var(--border, #2a2a33); color: var(--text, #eee); border-radius: 4px; padding: 4px 6px; font-size: 12px; }
+.sub-load, .sub-del { background: transparent; border: 1px solid var(--border, #2a2a33); color: var(--text, #eee); border-radius: 4px; cursor: pointer; padding: 2px 8px; }
+.sub-del { color: #ff6b6b; }
+.subclip-results { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.subclip-results li { color: var(--text-mute, #8a8a99); } .subclip-results li.err { color: #ff6b6b; }
+.subclip-results a { color: #e8ff3a; }
 .seg-card.off { opacity: .9; }
 .seg-fullscreen {
   display: inline-block; padding: 10px 12px; font-size: 12px; color: #ffb24d;

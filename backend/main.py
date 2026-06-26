@@ -1,3 +1,4 @@
+import logging
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import batchqueue as batch_queue
 import diarize
 import downloader
 import illustrator
+import render_remote
 import renderer
 import soundboard
 import thumbnail
@@ -98,24 +100,42 @@ def api_render(req: RenderRequest):
         src = downloader.get_source_path(req.job_id)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    try:
-        result = renderer.render(
-            job_id=req.job_id,
-            source_path=src,
-            title=req.title,
-            box=req.box,
-            illustrations=req.illustrations,
-            words=req.words,
-            caption_font=req.caption_font,
-            caption_size=req.caption_size,
-            render_start=req.render_start,
-            render_end=req.render_end,
-            sfx=req.sfx,
-            top_eighths=req.top_eighths,
-            fullscreen_windows=req.fullscreen_windows,
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+
+    # Offload to a remote GPU box if the farm is configured + reachable; otherwise
+    # (and on any box failure) fall back to a LOCAL render — zero regression when
+    # ILLUSTRATOR_RENDER_REMOTE_URLS is unset.
+    result = None
+    if render_remote.enabled():
+        try:
+            fname = f"{renderer._slugify(req.title or 'clip')}_{req.job_id}.mp4"
+            result = render_remote.render(
+                job_id=req.job_id, source_path=src,
+                params=req.model_dump(exclude={"job_id", "cleanup"}),
+                out_dir=renderer.OUTPUT_DIR, filename=fname)
+        except Exception as e:  # noqa: BLE001 — never let the farm break a render
+            logging.getLogger("illustrator").warning("remote render dispatch failed: %s", e)
+            result = None
+    if result is None:
+        try:
+            result = renderer.render(
+                job_id=req.job_id,
+                source_path=src,
+                title=req.title,
+                box=req.box,
+                illustrations=req.illustrations,
+                words=req.words,
+                caption_font=req.caption_font,
+                caption_size=req.caption_size,
+                caption_pos=req.caption_pos,
+                render_start=req.render_start,
+                render_end=req.render_end,
+                sfx=req.sfx,
+                top_eighths=req.top_eighths,
+                fullscreen_windows=req.fullscreen_windows,
+                keep_segments=req.keep_segments,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
 
     if req.cleanup:
         downloader.cleanup_job(req.job_id)

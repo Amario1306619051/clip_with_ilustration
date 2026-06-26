@@ -50,7 +50,15 @@ def _ffprobe(path: Path) -> dict:
     ]
     out = subprocess.run(cmd, capture_output=True, text=True, check=True)
     data = json.loads(out.stdout)
-    stream = data.get("streams", [{}])[0]
+    streams = data.get("streams") or []
+    if not streams:
+        # The download produced no VIDEO stream (audio-only / empty) — almost always
+        # YouTube throttling/blocking the request (the n-challenge couldn't fetch a
+        # video format). Surface that honestly instead of a cryptic IndexError.
+        raise RuntimeError(
+            "downloaded file has no video stream — YouTube likely rate-limited/blocked "
+            "the download. Add a logged-in cookies.txt (Netscape format) or retry later.")
+    stream = streams[0]
     fmt = data.get("format", {})
     width = int(stream.get("width", 0))
     height = int(stream.get("height", 0))
@@ -58,16 +66,46 @@ def _ffprobe(path: Path) -> dict:
     return {"width": width, "height": height, "duration": duration}
 
 
+def _trim(src: Path, start: str, end: Optional[str], dst: Path) -> None:
+    """Cut [start, end] from `src` → `dst` (re-encoded). Raises on ffmpeg failure."""
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", start]
+    if end:
+        cmd += ["-to", end]
+    cmd += ["-i", str(src),
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+            "-c:a", "aac", "-b:a", "192k", str(dst)]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg trim failed: {proc.stderr}")
+
+
 def download(url: str, start: str, end: Optional[str], title: str) -> dict:
-    """Download YouTube clip and trim to [start, end] window.
+    """Download a YouTube clip (or trim a LOCAL file) to the [start, end] window.
     Returns dict with job_id, video_path, duration, width, height.
     """
     job_id = _new_job_id()
-    raw_path = TEMP_DIR / f"{job_id}_raw.mp4"
     final_path = TEMP_DIR / f"{job_id}.mp4"
 
+    # LOCAL SOURCE: if `url` is a file already on disk (or file://…), trim the
+    # section straight from it — no yt-dlp, no YouTube throttle. Download the full
+    # video ONCE, point every clip's url at that file, and each clip just gets cut.
+    _local = url[7:] if url.startswith("file://") else url
+    if os.path.exists(_local) and os.path.isfile(_local):
+        no_trim = (not end) and str(start or "").replace(":", "").strip("0") == ""
+        if no_trim:
+            shutil.copy(_local, final_path)   # full video, no cut → instant (no re-encode)
+        else:
+            _trim(Path(_local), start, end, final_path)
+        info = _ffprobe(final_path)
+        return {"job_id": job_id, "video_path": f"/temp/{final_path.name}",
+                "duration": info["duration"], "width": info["width"], "height": info["height"]}
+
+    raw_path = TEMP_DIR / f"{job_id}_raw.mp4"
     ydl_opts = {
-        "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        # Cap at 1080p — plenty for a 9:16 crop, and a much smaller download than
+        # 1440p/4K, so a batch is far less likely to trip YouTube's media throttle.
+        "format": ("bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/"
+                   "best[height<=1080][ext=mp4]/best[height<=1080]/best"),
         "outtmpl": str(raw_path),
         "merge_output_format": "mp4",
         "quiet": True,
@@ -79,8 +117,15 @@ def download(url: str, start: str, end: Optional[str], title: str) -> dict:
         "socket_timeout": 30,
         "retries": 10,
         "fragment_retries": 10,
+        "extractor_retries": 5,
         "continuedl": True,
         "http_chunk_size": 10 * 1024 * 1024,
+        # Be a gentle client so YouTube doesn't bot-throttle a burst of downloads:
+        # sleep between the player/extraction requests + a small random pause before
+        # each download. (The batch worker also spaces whole downloads apart.)
+        "sleep_interval_requests": 1,
+        "sleep_interval": 2,
+        "max_sleep_interval": 6,
     }
     # Enable a JS runtime for YouTube's n-challenge — without this, yt-dlp
     # gets only the storyboard images back. Prefer node, fall back to deno/bun
@@ -126,18 +171,7 @@ def download(url: str, start: str, end: Optional[str], title: str) -> dict:
             raise RuntimeError("yt-dlp failed to produce a file")
         raw_path = candidates[0]
 
-    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-           "-ss", start]
-    if end:
-        cmd += ["-to", end]
-    cmd += ["-i", str(raw_path),
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-c:a", "aac", "-b:a", "192k",
-            str(final_path)]
-
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-    if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg trim failed: {proc.stderr}")
+    _trim(raw_path, start, end, final_path)
 
     try:
         raw_path.unlink()
