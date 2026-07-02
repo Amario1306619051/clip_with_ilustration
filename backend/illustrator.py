@@ -22,6 +22,7 @@ from typing import Optional
 import requests
 
 import config
+import imagesources
 import llm
 
 log = logging.getLogger(__name__)
@@ -34,15 +35,22 @@ PEXELS_SEARCH = "https://api.pexels.com/v1/search"
 
 # ───────────────────────── segmentation ─────────────────────────
 
-def segment_clip(words: list[dict], duration: float, seg_seconds: float) -> list[dict]:
-    """Return [{idx, t_start, t_end, text}] covering [0, duration]."""
+def segment_clip(words: list[dict], duration: float, seg_seconds: float,
+                 t_start: float = 0.0, t_end_limit: Optional[float] = None) -> list[dict]:
+    """Return [{idx, t_start, t_end, text}] covering [t_start, t_end_limit or duration].
+    A range can be passed to plan illustrations for ONE sub-clip only (so a long
+    source isn't segmented end-to-end when you just want a few moments)."""
     seg_seconds = max(1.0, float(seg_seconds))
     duration = max(seg_seconds, float(duration))
+    lo = max(0.0, float(t_start or 0.0))
+    hi = min(float(duration), float(t_end_limit)) if t_end_limit else float(duration)
+    if hi <= lo:
+        hi = duration
     segments: list[dict] = []
     idx = 0
-    t = 0.0
-    while t < duration - 1e-6:
-        t_end = min(t + seg_seconds, duration)
+    t = lo
+    while t < hi - 1e-6:
+        t_end = min(t + seg_seconds, hi)
         text = " ".join(
             w["word"] for w in words
             if w["start"] < t_end and w["end"] > t
@@ -98,12 +106,16 @@ def plan(
     seg_seconds: float,
     title: str = "",
     description: str = "",
+    t_start: float = 0.0,
+    t_end: Optional[float] = None,
+    source: str = "all",
 ) -> list[dict]:
     """Full plan: segments with queries and candidate images attached. The FULL
     transcript (joined from all words) is passed to the LLM as global context so it
     can infer the video's overall topic and anchor every per-window query to it
-    instead of chasing literal words. title/description are optional extra hints."""
-    segments = segment_clip(words, duration, seg_seconds)
+    instead of chasing literal words. title/description are optional extra hints.
+    [t_start, t_end] scopes planning to ONE sub-clip's range (default = whole clip)."""
+    segments = segment_clip(words, duration, seg_seconds, t_start, t_end)
     full_transcript = " ".join(w["word"] for w in words).strip()
     queries = llm.queries_for_segments(
         [s["text"] for s in segments],
@@ -117,7 +129,7 @@ def plan(
     for seg, q in zip(segments, queries):
         seg["query"] = q
         if q not in cache:
-            cache[q] = search_pexels(q)
+            cache[q] = imagesources.search(q, source=source)
         seg["candidates"] = cache[q]
     return segments
 
@@ -126,7 +138,14 @@ def plan(
 
 def download_pick(job_id: str, url: str) -> Path:
     """Download one picked image to temp/, deduped by URL hash so two segments
-    using the same image share one file. Returns the local path."""
+    using the same image share one file. Returns the local path.
+    A `/temp/...` url is a user-UPLOADED image already on disk — used directly
+    (keeps its original bytes/format, so PNG alpha for stickers is preserved)."""
+    if url.startswith("/temp/"):
+        local = TEMP_DIR / Path(url).name        # Path().name strips any ../
+        if not local.exists():
+            raise FileNotFoundError(f"uploaded image missing: {url}")
+        return local
     digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:12]
     dest = TEMP_DIR / f"{job_id}_ill_{digest}.jpg"
     if dest.exists():

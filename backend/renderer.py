@@ -2,6 +2,8 @@ import json
 import os
 import re
 import subprocess
+import tempfile
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -11,6 +13,45 @@ from models import FullscreenWindow, IllustrationPick, KeepSegment, Keyframe, Sf
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# ── live render progress, keyed by a per-render token the UI polls ──
+# Value = {"phase": "uploading"|"rendering", "pct": 0–100}. The upload phase is the
+# source transfer to a GPU box (the slow part for a big clip); rendering is ffmpeg.
+# Written by the -progress watcher + the remote upload/relay callbacks; read by
+# /api/render-progress.
+_PROGRESS: dict[str, dict] = {}
+
+
+def get_progress(token: str):
+    """Current {phase,pct} for a render token (None if unknown/finished+cleared)."""
+    return _PROGRESS.get(token)
+
+
+def set_progress(token: str, pct, phase: str = "rendering") -> None:
+    """Publish progress for a token (ffmpeg watcher, or a relayed remote/upload %)."""
+    if token:
+        _PROGRESS[token] = {"phase": phase, "pct": round(float(pct), 1)}
+
+
+def clear_progress(token: str) -> None:
+    if token:
+        _PROGRESS.pop(token, None)
+
+
+def _watch_progress(token: str, prog_file: str, total: float, stop: threading.Event):
+    """Tail ffmpeg's -progress file and publish percent until told to stop."""
+    pat = re.compile(r"out_time_(?:us|ms)=(\d+)")   # both are microseconds in practice
+    while not stop.is_set():
+        try:
+            txt = Path(prog_file).read_text(errors="ignore")
+            m = pat.findall(txt)
+            if m:
+                pct = min(99.0, (int(m[-1]) / 1e6) / max(0.1, total) * 100.0)
+                set_progress(token, pct, "rendering")
+        except Exception:  # noqa: BLE001 — file not ready / mid-write
+            pass
+        if stop.wait(0.4):
+            break
 
 # Bundled caption fonts (OFL). libass is pointed here via `fontsdir=` so burned
 # captions use these instead of a generic host fallback. Families: "Anton",
@@ -130,7 +171,36 @@ def _ass_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("{", "\\{").replace("}", "\\}")
 
 
-def _build_ass(groups: list[dict], font: str, size: int, caption_y: int) -> str:
+def _overlay_dialogues(text_overlays, rs: float, re_: Optional[float]) -> list[str]:
+    """Styled text overlays → ASS Dialogue lines (reuse the Caption style with full
+    inline overrides so they don't depend on the karaoke styling). Times are rebased
+    onto the render timeline (the same rs the captions/words used; keep-trim → rs=0,
+    burned before the select so re-timing stays correct). Position = fractional
+    center via \\an5 + \\pos. Skips overlays that fall entirely outside the range."""
+    lines: list[str] = []
+    for o in (text_overlays or []):
+        a = float(getattr(o, "start", 0.0)) - rs
+        b = float(getattr(o, "end", 0.0)) - rs
+        if b <= 0.0 or (re_ is not None and a >= (re_ - rs)):
+            continue
+        a = max(0.0, a)
+        raw = str(getattr(o, "text", "") or "")
+        if not raw.strip():
+            continue
+        txt = _ass_escape(raw).replace("\r\n", "\\N").replace("\n", "\\N")
+        x = int(max(0.0, min(1.0, float(getattr(o, "x_frac", 0.5)))) * OUT_W)
+        y = int(max(0.0, min(1.0, float(getattr(o, "y_frac", 0.5)))) * OUT_H)
+        size = max(12, int(getattr(o, "size", 56) or 56))
+        font = getattr(o, "font", "Anton") or "Anton"
+        color = to_ass_color(getattr(o, "color", "#FFFFFF") or "#FFFFFF")
+        ov = (f"{{\\an5\\pos({x},{y})\\fn{font}\\fs{size}\\1c{color}"
+              f"\\bord{max(2, size // 16)}\\shad2}}")
+        lines.append(
+            f"Dialogue: 0,{_fmt_ass_time(a)},{_fmt_ass_time(b)},Caption,,0,0,0,,{ov}{txt}")
+    return lines
+
+
+def _build_ass(groups: list[dict], font: str, size: int, y_for) -> str:
     """TikTok-karaoke captions: each word group → one Dialogue line per word
     time-slice, with the active word recolored to the accent + slightly scaled.
     Fat outline + shadow. Per-word timing comes from group["words"] (Whisper)."""
@@ -153,9 +223,11 @@ Style: Caption,{font},{size},{primary},{primary},{outline},{back},1,0,0,0,100,10
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
-    pos = f"{{\\pos({OUT_W // 2},{int(caption_y)})}}"
+    # y_for may be an int (constant y) or a callable t -> y (per-window position).
+    _yf = y_for if callable(y_for) else (lambda _t: int(y_for))
     lines = []
     for g in groups:
+        pos = f"{{\\pos({OUT_W // 2},{int(_yf(g['start']))})}}"
         words = g.get("words") or [{"text": g["text"], "start": g["start"], "end": g["end"]}]
         n = len(words)
         for j in range(n):
@@ -681,12 +753,16 @@ def render(
     caption_font: str = "Bricolage Grotesque",
     caption_size: int = 64,
     caption_pos: str = "middle",
+    caption_pos_ranges: Optional[list] = None,
+    text_overlays: Optional[list] = None,
+    stickers: Optional[list] = None,
     render_start: Optional[float] = None,
     render_end: Optional[float] = None,
     sfx: Optional[list[SfxPlacement]] = None,
     top_eighths: float = 3.0,
     fullscreen_windows: Optional[list[FullscreenWindow]] = None,
     keep_segments: Optional[list[KeepSegment]] = None,
+    progress_id: Optional[str] = None,
 ) -> dict:
     if not box:
         raise ValueError("box (top crop) is required with >= 1 keyframe")
@@ -749,10 +825,29 @@ def render(
 
     # Build ASS captions — caption always sits at the top/bottom slot boundary.
     groups = _group_words(words) if words else []
-    # Caption vertical position: top / middle (slot boundary, default) / bottom.
-    _cp = (caption_pos or "middle").lower()
-    cap_y = int(OUT_H * 0.13) if _cp == "top" else int(OUT_H * 0.87) if _cp == "bottom" else top_h
-    ass_text = _build_ass(groups, caption_font, caption_size, cap_y)
+    # Caption vertical position: a global default + optional per-time-window
+    # overrides. top → ~13% from the top, bottom → ~87%, middle → slot boundary.
+    def _pos_y(p):
+        p = (p or "middle").lower()
+        return int(OUT_H * 0.13) if p == "top" else int(OUT_H * 0.87) if p == "bottom" else top_h
+    _default_y = _pos_y(caption_pos)
+    # Rebase the override windows onto the render timeline (same rs the captions used).
+    _cpr = []
+    for r in (caption_pos_ranges or []):
+        a = float(getattr(r, "start", 0.0)) - rs
+        b = float(getattr(r, "end", 0.0)) - rs
+        if b > 0.0 and (re_ is None or a < (re_ - rs)):
+            _cpr.append((max(0.0, a), b, getattr(r, "pos", "middle")))
+
+    def _cap_y_for(t):
+        for a, b, p in _cpr:
+            if a <= t < b:
+                return _pos_y(p)
+        return _default_y
+    ass_text = _build_ass(groups, caption_font, caption_size, _cap_y_for)
+    overlay_lines = _overlay_dialogues(text_overlays, rs, re_)
+    if overlay_lines:
+        ass_text = ass_text.rstrip("\n") + "\n" + "\n".join(overlay_lines) + "\n"
     ass_path = source_path.parent / f"{job_id}.ass"
     ass_path.write_text(ass_text, encoding="utf-8")
 
@@ -810,18 +905,57 @@ def render(
             )
             last = nxt
 
+    # PNG stickers (alpha) — free-positioned, scaled by width, overlaid over their
+    # window ON TOP of everything (captions/text still burn on top of these).
+    # Inputs come AFTER the cutaway images (indices 1+N .. 1+N+M-1), before SFX.
+    stk_entries: list[tuple] = []   # (path, a, b, sticker)
+    for s in (stickers or []):
+        a = float(getattr(s, "start", 0.0)) - rs
+        b = float(getattr(s, "end", 0.0)) - rs
+        if b <= 0.0 or (re_ is not None and a >= (re_ - rs)):
+            continue
+        a = max(0.0, a)
+        if re_ is not None:
+            b = min(b, re_ - rs)
+        if b <= a:
+            continue
+        try:
+            sp = illustrator.download_pick(job_id, getattr(s, "url", "") or "")
+        except Exception:  # noqa: BLE001 — a missing sticker file must not kill the render
+            continue
+        stk_entries.append((sp, a, b, s))
+    n_img = len(img_inputs)
+    for k, (sp, a, b, s) in enumerate(stk_entries):
+        si = 1 + n_img + k
+        w = max(2, int((float(getattr(s, "scale", 0.3)) or 0.3) * OUT_W))
+        op = float(getattr(s, "opacity", 1.0) or 1.0)
+        chain = f"[{si}:v]scale={w}:-2:flags=lanczos,format=rgba"
+        if op < 0.999:
+            chain += f",colorchannelmixer=aa={max(0.0, min(1.0, op)):.3f}"
+        parts.append(f"{chain}[stk{k}]")
+        xf = _fmt_num(max(0.0, min(1.0, float(getattr(s, 'x_frac', 0.5)))))
+        yf = _fmt_num(max(0.0, min(1.0, float(getattr(s, 'y_frac', 0.5)))))
+        nxt = f"bstk{k}"
+        parts.append(
+            f"[{last}][stk{k}]overlay=x='{xf}*W-w/2':y='{yf}*H-h/2':"
+            f"enable='between(t,{_fmt_num(a)},{_fmt_num(b)})':eof_action=pass[{nxt}]"
+        )
+        last = nxt
+
     # Soundboard SFX → audio mix (only when sounds are placed). SFX inputs come
-    # AFTER the video (0) and the image inputs (1..N), so they start at 1+N.
+    # AFTER the video (0), the image inputs (1..N), and the stickers, so they
+    # start at 1+N+len(stickers).
     sfx_inputs, sfx_parts, amap = _audio_inputs_and_graph(
-        sfx, _probe_has_audio(source_path), dur, first_sfx_index=1 + len(img_inputs))
+        sfx, _probe_has_audio(source_path), dur, first_sfx_index=1 + len(img_inputs) + len(stk_entries))
     if sfx_parts:
         parts.extend(sfx_parts)
     audio_map = amap or "0:a?"
 
     ass_path_escaped = str(ass_path).replace("\\", "/").replace(":", "\\:")
     fonts_escaped = str(FONTS_DIR).replace("\\", "/").replace(":", "\\:")
-    if groups:
+    if groups or overlay_lines:
         # fontsdir → libass uses bundled Anton/Bebas Neue, not a host fallback.
+        # (overlay_lines burn through the same pass even when there's no caption.)
         parts.append(f"[{last}]subtitles={ass_path_escaped}:fontsdir={fonts_escaped}[outv]")
         vmap = "[outv]"
     else:
@@ -873,8 +1007,14 @@ def render(
         cmd += ["-itsoffset", f"{float(pick.t_start):.3f}", "-loop", "1",
                 "-framerate", fr, "-t", f"{win:.3f}", "-i", str(path)]
 
-    # SFX inputs come after the video + image inputs (indices line up with
-    # first_sfx_index = 1 + len(img_inputs) used when building the audio graph).
+    # Sticker inputs follow the cutaway images (same still-image feeding).
+    for sp, a, b, _s in stk_entries:
+        win = max(0.1, b - a)
+        cmd += ["-itsoffset", f"{a:.3f}", "-loop", "1",
+                "-framerate", "2", "-t", f"{win:.3f}", "-i", str(sp)]
+
+    # SFX inputs come after the video + image + sticker inputs (indices line up
+    # with first_sfx_index = 1 + len(img_inputs) + len(stickers) above).
     cmd += sfx_inputs
 
     cmd += [
@@ -887,7 +1027,36 @@ def render(
         str(output_path),
     ]
 
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # Live progress: ffmpeg writes out_time to a temp file; a watcher publishes the
+    # percent against the OUTPUT duration (kept windows if trimmed, else `dur`).
+    prog_file = None
+    watcher = None
+    stop = threading.Event()
+    if progress_id:
+        out_total = sum(b - a for a, b in keep) if keep else dur
+        pf = tempfile.NamedTemporaryFile(prefix="illrender_", suffix=".prog", delete=False)
+        prog_file = pf.name
+        pf.close()
+        cmd = [cmd[0], "-progress", prog_file, "-nostats", *cmd[1:]]
+        set_progress(progress_id, 0.0, "rendering")
+        watcher = threading.Thread(target=_watch_progress,
+                                   args=(progress_id, prog_file, max(0.1, out_total), stop),
+                                   daemon=True)
+        watcher.start()
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    finally:
+        if watcher:
+            stop.set()
+            watcher.join(timeout=1.5)
+        if progress_id:
+            _PROGRESS.pop(progress_id, None)   # the caller learns "done" from the response, not the poll
+        if prog_file:
+            try:
+                Path(prog_file).unlink(missing_ok=True)
+            except OSError:
+                pass
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg render failed:\n{proc.stderr}")
 

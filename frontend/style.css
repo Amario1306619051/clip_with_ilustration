@@ -581,7 +581,19 @@ kbd {
 .hint { color: var(--text-mute); font-size: 11px; margin-left: auto; }
 
 /* ── Crop cut bars (Crop step) ── */
-.cut-lanes { margin: 6px 0 2px; display: flex; flex-direction: column; gap: 4px; }
+/* padding makes the cut tracks share the dots track's left-origin + width so the
+   bars line up with the dots (and the playhead, which positions itself off the
+   dots track). Math: timeline 1px border + 10px pad puts its dots track at +11;
+   the cut-track's own 1px border adds back 1, so 10px here lands them together. */
+.cut-lanes { margin: 6px 0 2px; padding: 0 10px; display: flex; flex-direction: column; gap: 4px; }
+/* The play scrubber lives INSIDE the timeline (a labeled track row) like clipper,
+   so it shares the dots/bars axis — the visible playhead is the cursor line, the
+   range thumb is hidden. */
+.vc-spacer { flex: 1; }
+.scrub-lane { height: 18px; }
+/* visible draggable dot to skip time (lives on the aligned Play lane); the
+   cursor line is the precise indicator, the dot is the grab handle. */
+.tl-scrubber { flex: 1; height: 4px; cursor: pointer; }
 .cut-lane { display: flex; align-items: center; height: 20px; gap: 10px; }
 .cut-lane-lbl {
   width: 48px; font-size: 10px; color: var(--text-mute);
@@ -1177,3 +1189,108 @@ kbd {
   border: 1px solid var(--accent); border-radius: 999px; padding: 0 6px;
 }
 .queue-empty-room { font-size: 11px; color: var(--text-mute); font-style: italic; padding: 8px 2px; list-style: none; }
+
+/* ── Text overlays (Crop step) ────────────────────────────────────────── */
+.ovl-editor { margin: 8px 0 4px; padding: 10px; border: 1px solid var(--line, #2a2a2a); border-radius: 8px; background: rgba(255,255,255,0.02); }
+.ovl-editor textarea { width: 100%; box-sizing: border-box; resize: vertical; font: inherit; margin-bottom: 8px; color: inherit; background: rgba(0,0,0,0.2); border: 1px solid var(--line, #2a2a2a); border-radius: 6px; padding: 6px; }
+.ovl-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
+.ovl-row label { display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
+.ovl-row label > span { opacity: 0.7; }
+.ovl-row input[type=number] { width: 64px; }
+.ovl-row input[type=color] { width: 42px; height: 28px; padding: 0; border: none; background: none; cursor: pointer; }
+.ovl-pos-wrap { display: flex; flex-direction: column; gap: 3px; }
+.ovl-lbl { font-size: 11px; opacity: 0.7; }
+.ovl-grid { display: grid; grid-template-columns: repeat(3, 22px); grid-template-rows: repeat(3, 22px); gap: 2px; }
+.ovl-grid button { padding: 0; border: 1px solid var(--line, #2a2a2a); background: rgba(255,255,255,0.03); color: inherit; border-radius: 3px; cursor: pointer; font-size: 12px; line-height: 1; }
+.ovl-grid button:hover { background: rgba(232,255,58,0.15); }
+.ovl-grid button.active { background: #E8FF3A; color: #111; border-color: #E8FF3A; }
+.ovl-list { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.ovl-list li { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 5px 8px; border: 1px solid var(--line, #2a2a2a); border-radius: 6px; background: rgba(255,255,255,0.02); }
+.ovl-list li.current { outline: 1px solid #E8FF3A; }
+.ovl-list li.empty { opacity: 0.5; justify-content: center; }
+.ovl-list .o-name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ovl-list .o-when { opacity: 0.6; }
+.ovl-list button { border: none; background: rgba(255,255,255,0.06); color: inherit; border-radius: 4px; cursor: pointer; padding: 3px 7px; }
+.ovl-list button.danger:hover { background: #c0392b; }
+.cut-bar.ovl.sel { outline: 2px solid #E8FF3A; outline-offset: 1px; }
+.stk-thumb { width: 40px; height: 40px; object-fit: contain; border: 1px solid var(--line, #2a2a2a); border-radius: 4px; background: repeating-conic-gradient(#2a2a2a 0% 25%, #1a1a1a 0% 50%) 50% / 12px 12px; }
+.ovl-row input[type=range] { width: 90px; }
+.cut-bar.stk.sel { outline: 2px solid #E8FF3A; outline-offset: 1px; }
+
+/* ── Sub-clips page (step 7) ──────────────────────────────────────────── */
+.subclip-stage-wrap { max-width: 760px; }
+.source-stage-sub { background: #000; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.source-stage-sub video { width: 100%; max-height: 340px; display: block; object-fit: contain; background: #000; }
+.sub-tl-wrap { position: relative; }
+.cut-bar.sub.dim { opacity: .38; }
+.sub-trim-ctrls { font-size: 11px; color: var(--text-mute); }
+.cut-lane[data-sel-trim] .cut-bar { background: rgba(70,211,105,.20); border-color: #46d369; }
+.subclip-list { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 4px; }
+.subclip-list li { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: rgba(255,255,255,.02); }
+.subclip-list li.current { outline: 1px solid var(--accent); }
+.subclip-list li.empty { opacity: .5; justify-content: center; }
+.subclip-list .sc-name { font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subclip-list .sc-when { opacity: .6; }
+.subclip-list .sc-trim { color: #46d369; font-size: 11px; }
+.subclip-list input[type=checkbox] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+.subclip-list button { border: none; background: rgba(255,255,255,.06); color: inherit; border-radius: 4px; cursor: pointer; padding: 3px 7px; }
+.subclip-list button.danger:hover { background: #c0392b; }
+.subclip-results { list-style: none; padding: 0; margin: 8px 0 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.subclip-results a { color: var(--accent); }
+.subclip-results .err { color: #ff6b6b; }
+
+/* ── Short preview on the Illustration step ───────────────────────────── */
+.ill-preview { float: right; position: sticky; top: 16px; margin: 0 0 16px 22px; width: 270px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; z-index: 5; }
+.ill-preview canvas { display: block; width: 270px; height: 480px; border-radius: 4px; background: #000; }
+.ill-preview .preview-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-mute); margin-bottom: 6px; text-align: center; }
+.ill-preview .scrubber { width: 100%; margin-top: 8px; }
+.ill-prev-ctrls { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+.ill-prev-ctrls .ctrl-btn { flex: 0 0 auto; }
+.ill-scrub-wrap { position: relative; flex: 1; display: flex; align-items: center; }
+.ill-scrub-wrap .scrubber { width: 100%; margin: 0; position: relative; z-index: 2; }
+.ill-cuts { position: absolute; left: 0; right: 0; top: 50%; transform: translateY(-50%); height: 7px; border-radius: 2px; pointer-events: none; z-index: 1; }
+.ill-cut-band { position: absolute; top: 0; bottom: 0; border-radius: 2px;
+  background: repeating-linear-gradient(45deg, rgba(255,80,80,.55) 0 4px, rgba(255,80,80,.15) 4px 8px); }
+
+/* Segments fully/partly trimmed out on the Illustration step */
+.seg-card.seg-cut { opacity: .5; background: repeating-linear-gradient(45deg, rgba(255,80,80,.06) 0 8px, transparent 8px 16px), var(--bg-elev); }
+.seg-cut-badge { font-size: 10px; font-weight: 700; color: #ff7676; border: 1px solid rgba(255,118,118,.5); border-radius: 3px; padding: 0 5px; margin-left: 6px; white-space: nowrap; }
+.seg-cut-badge.partial { color: #ffb24d; border-color: rgba(255,178,77,.5); }
+.seg-cut-note { font-size: 12px; color: var(--text-dim); padding: 6px 2px; display: block; }
+
+/* Per-sub-clip render list on the Render step */
+.render-subs-list { list-style: none; margin: 10px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.rs-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: var(--radius); font-size: 13px; }
+.rs-row.current { border-color: var(--accent); }
+.rs-row .rs-name { font-weight: 600; color: var(--text); min-width: 80px; }
+.rs-row .rs-when { color: var(--text-dim); font-size: 12px; }
+.rs-row .rs-meta { color: var(--text-dim); font-size: 12px; }
+.rs-row .rs-go { margin-left: auto; padding: 5px 12px; font-size: 12px; cursor: pointer; flex: 0 0 auto; }
+.rs-row .rs-res { font-size: 12px; min-width: 90px; text-align: right; }
+.rs-row .rs-res a { color: var(--accent); }
+.rs-row .rs-res .err { color: #ff6b6b; }
+.rs-pct { color: var(--accent); font-variant-numeric: tabular-nums; font-weight: 600; }
+
+/* ── Thumbnail multi-box background slots + segment toggle ────────────── */
+.thumb-sec { background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.thumb-sec-head { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--text-dim); }
+.thumb-seg { display: inline-flex; border: 1px solid var(--border-strong); border-radius: var(--radius); overflow: hidden; width: fit-content; }
+.thumb-seg .seg { border: none; border-radius: 0; padding: 5px 12px; font-size: 12px; color: var(--text-dim); background: transparent; cursor: pointer; }
+.thumb-seg .seg + .seg { border-left: 1px solid var(--border-strong); }
+.thumb-seg .seg.active { background: var(--accent); color: #0a0a0a; font-weight: 700; }
+.thumb-slot { border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; display: flex; flex-direction: column; gap: 8px; background: var(--bg-elev-2); margin-top: 8px; }
+.thumb-slot-head { font-size: 12px; font-weight: 600; color: var(--text); }
+.thumb-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.thumb-fit { width: auto; padding: 4px 6px; font-size: 11px; }
+.thumb-scene { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.thumb-capture { padding: 5px 10px; font-size: 12px; cursor: pointer; }
+.thumb-snap, .thumb-ill-status { font-size: 11px; }
+.thumb-ill { display: flex; flex-direction: column; gap: 6px; }
+.thumb-ill-search { display: flex; gap: 6px; }
+.thumb-ill-search input { flex: 1; min-width: 0; }
+.thumb-ill-search button { padding: 6px 10px; cursor: pointer; }
+.thumb-ill-cands { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; max-height: 150px; overflow-y: auto; }
+.thumb-cand { padding: 0; border: 1px solid var(--border-strong); border-radius: 3px; overflow: hidden; aspect-ratio: 2/3; background: var(--bg-elev); cursor: pointer; }
+.thumb-cand img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumb-cand:hover { border-color: var(--accent); }

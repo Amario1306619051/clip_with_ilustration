@@ -102,6 +102,7 @@ _JOB_COLS = [
     "step_seconds", "room_id", "director", "diarization", "transcript", "expect",
     "status", "message", "job_id", "video_path",
     "width", "height", "duration", "output_path", "filename",
+    "editor_state",   # full editor state JSON (sub-clips + buffer) — auto-saved
 ]
 
 
@@ -156,6 +157,7 @@ def _init_db() -> None:
                     "ALTER TABLE jobs ADD COLUMN transcript TEXT",
                     "ALTER TABLE jobs ADD COLUMN expect TEXT",
                     "ALTER TABLE jobs ADD COLUMN top_eighths REAL",
+                    "ALTER TABLE jobs ADD COLUMN editor_state TEXT",
                     "ALTER TABLE keyframes ADD COLUMN dynamic INTEGER",
                     "ALTER TABLE keyframes ADD COLUMN moving INTEGER"):
             try:
@@ -441,7 +443,7 @@ def save_job(key: str, patch: dict) -> Optional[dict]:
     """Persist edits from the editor (title + keyframes). Only known fields."""
     allowed = {k: patch[k] for k in
                ("title", "box1", "box2", "description", "context", "prompt1", "prompt2",
-                "top_eighths")
+                "top_eighths", "editor_state")
                if k in patch}
     if not allowed:
         return _find(key)

@@ -6,8 +6,8 @@
 <title>ILLUSTRATOR</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css?v=20260625b">
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&family=JetBrains+Mono:wght@400;500;700&family=Archivo+Black&family=Poppins:wght@700&family=Fjalla+One&family=Bangers&family=Titan+One&family=Alfa+Slab+One&family=Oswald:wght@500;600&family=Bungee&family=Righteous&family=Luckiest+Guy&family=Permanent+Marker&family=Pacifico&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css?v=20260701e">
 </head>
 <body>
 <header class="topbar">
@@ -18,10 +18,13 @@
   <nav class="steps">
     <button class="step active" data-step="1"><span>01</span> Source</button>
     <button class="step" data-step="2"><span>02</span> Crop</button>
-    <button class="step" data-step="3"><span>03</span> Illustration</button>
-    <button class="step" data-step="4"><span>04</span> Render</button>
-    <button class="step" data-step="5"><span>05</span> Thumbnail</button>
-    <button class="step" data-step="6"><span>06</span> Sound</button>
+    <button class="step" data-step="7"><span>03</span> Sub-clips</button>
+    <button class="step" data-step="9"><span>04</span> Trim</button>
+    <button class="step" data-step="3"><span>05</span> Illustration</button>
+    <button class="step" data-step="8"><span>06</span> Text/Sticker</button>
+    <button class="step" data-step="4"><span>07</span> Render</button>
+    <button class="step" data-step="5"><span>08</span> Thumbnail</button>
+    <button class="step" data-step="6"><span>09</span> Sound</button>
   </nav>
   <div class="hist-controls">
     <button id="btn-undo" class="hist-btn" title="Undo (Ctrl+Z)" disabled>↶</button>
@@ -115,11 +118,15 @@
           <button class="ctrl-btn small" id="btn-back-1" title="-1s (←)">«</button>
           <button class="ctrl-btn small" id="btn-fwd-1" title="+1s (→)">»</button>
           <span class="time-cur" id="time-cur">0:00.0</span>
-          <input type="range" id="scrubber" class="scrubber" min="0" max="100" step="0.05" value="0">
+          <span class="vc-spacer"></span>
           <span class="time-dur" id="time-dur">0:00.0</span>
         </div>
 
         <div class="timeline" id="timeline">
+          <div class="timeline-track scrub-lane">
+            <span class="timeline-label">Play</span>
+            <input type="range" id="scrubber" class="scrubber tl-scrubber" min="0" max="100" step="0.05" value="0">
+          </div>
           <div class="timeline-track" data-box="1">
             <span class="timeline-label">Crop</span>
             <div class="timeline-dots" id="dots-1"></div>
@@ -162,19 +169,24 @@
           <button class="cut-btn" id="btn-split-1">Split crop here</button>
         </div>
 
-        <div class="cut-lanes" id="trim-lane-wrap">
+
+        <div class="cut-lanes" id="cap-pos-lane-wrap">
           <div class="cut-lane">
-            <span class="cut-lane-lbl" title="Trim: mark windows to KEEP — everything outside is cut and the kept parts are joined. Scrub the video, Set A then Set B. Drag a bar to move, edges to resize.">Trim</span>
-            <div class="cut-lane-track" id="trim-track"></div>
+            <span class="cut-lane-lbl" title="Caption position windows: in each window the caption sits top/middle/bottom. Outside any window it uses the default (Render step). Scrub, pick a position, Set A then Set B.">Caption pos</span>
+            <div class="cut-lane-track" id="cap-pos-track"></div>
           </div>
         </div>
         <div class="cut-controls">
-          <span class="cut-controls-lbl">Trim — keep only marked windows (the rest is cut):</span>
-          <button class="cut-btn" id="btn-trim-a">Set A (start)</button>
-          <button class="cut-btn" id="btn-trim-b">Set B (end)</button>
-          <button class="cut-btn" id="btn-trim-here">+ keep ~3s here</button>
-          <button class="cut-btn" id="btn-trim-clear">Clear</button>
-          <span class="status" id="trim-status"></span>
+          <span class="cut-controls-lbl">Caption position over time (else uses the default):</span>
+          <select id="cap-pos-new" title="Position for the next window you add">
+            <option value="top">Top</option>
+            <option value="middle">Middle</option>
+            <option value="bottom" selected>Bottom</option>
+          </select>
+          <button class="cut-btn" id="btn-cappos-a">Set A</button>
+          <button class="cut-btn" id="btn-cappos-b">Set B (add)</button>
+          <button class="cut-btn" id="btn-cappos-clear">Clear</button>
+          <span class="status" id="cappos-status"></span>
         </div>
 
         <div class="autobox">
@@ -240,47 +252,39 @@
       <span class="status" id="tr-status"></span>
     </div>
 
-    <div class="subclip-panel" id="subclip-panel">
-      <div class="subclip-head">
-        <h2>Sub-clips · many exports from this one source</h2>
-        <span class="hint">Set up a moment (crop · illustrations · caption), scrub the video above, hit <b>⟵ Start</b> / <b>End ⟶</b> at the playhead to set its range, then <b>+ Add sub-clip</b>. Each keeps its OWN setup and renders to its own file. Click a bar to load it back. (No sub-clips = the normal single render still works.)</span>
-      </div>
-      <div class="subclip-pv-btns">
-        <button id="btn-sub-start" class="cut-btn">⟵ Start @ playhead</button>
-        <span id="subclip-range-lbl" class="subclip-when">range: full clip</span>
-        <button id="btn-sub-end" class="cut-btn">End @ playhead ⟶</button>
-      </div>
-      <div class="cut-lanes">
-        <div class="cut-lane">
-          <span class="cut-lane-lbl">Sub-clips</span>
-          <div class="cut-lane-track" id="subclip-track"></div>
-        </div>
-      </div>
-      <div class="subclip-controls">
-        <button id="btn-sub-add" class="primary small">+ Add sub-clip</button>
-        <button id="btn-sub-update" class="ghost small" title="Save the current setup into the selected sub-clip">⤓ Save edits to selected</button>
-        <button id="btn-sub-render" class="primary small">🎬 Render all sub-clips</button>
-        <span class="status" id="sub-status"></span>
-      </div>
-      <ul class="subclip-list" id="subclip-list"></ul>
-      <ul class="subclip-results" id="subclip-results"></ul>
-    </div>
   </section>
 
   <!-- STEP 3: ILUSTRASI -->
   <section class="panel hidden" id="panel-3">
     <div class="panel-head">
       <h1>Illustration</h1>
-      <p>The clip is split into N-second segments. For each segment the AI finds an image that matches the topic — pick one per segment.</p>
+      <p>Generate gives a starting set of illustrations. Then per illustration you control: its <b>duration</b> (drag the TIMING bars), its <b>motion</b> (dropdown on each card), and you can toggle any one to <b>🎬 full-screen video</b> (no illustration = full bbox). Images can mix from all sources.</p>
     </div>
+
+    <aside class="ill-preview" id="ill-preview-wrap">
+      <div class="preview-label">Short preview</div>
+      <canvas id="preview-ill" width="270" height="480"></canvas>
+      <div class="ill-prev-ctrls">
+        <button id="ill-play" class="ctrl-btn" title="Play / pause the sub-clip with sound (Space)">▶</button>
+        <div class="ill-scrub-wrap">
+          <div class="ill-cuts" id="ill-cuts" title="hatched = trimmed out (skipped on play + render)"></div>
+          <input type="range" id="ill-scrub" class="scrubber" min="0" max="100" step="0.05" value="0">
+        </div>
+      </div>
+      <div class="hint" style="text-align:center;margin-top:2px">play / scrub to preview · 🔊 with sound · ▨ = trimmed out</div>
+    </aside>
 
     <div class="ill-controls">
       <label>
-        <span>Duration per illustration (seconds)</span>
+        <span>Editing sub-clip</span>
+        <select id="ill-active-sub" title="Which sub-clip these illustrations belong to (pick one in Sub-clips first)"></select>
+      </label>
+      <label>
+        <span>Initial split (s) — drag bars to fine-tune each</span>
         <input type="number" id="seg-seconds" value="5" min="1" max="30" step="1">
       </label>
       <label>
-        <span>Motion (image never leaves the frame)</span>
+        <span>Default motion (override per illustration)</span>
         <select id="ill-motion">
           <option value="auto" selected>Auto (varied)</option>
           <option value="none">Off (static)</option>
@@ -289,6 +293,10 @@
           <option value="pan_right">Pan →</option>
           <option value="pan_left">Pan ←</option>
         </select>
+      </label>
+      <label>
+        <span>Image source</span>
+        <select id="ill-source" title="Where images come from — All = mix every source (copyright-free / royalty-free)"></select>
       </label>
       <button id="btn-plan" class="primary">Generate illustrations →</button>
       <span class="status" id="plan-status"></span>
@@ -340,6 +348,12 @@
             <select id="cap-font">
               <option>Anton</option>
               <option>Bebas Neue</option>
+              <option>Archivo Black</option>
+              <option>Poppins</option>
+              <option>Fjalla One</option>
+              <option>Bangers</option>
+              <option>Titan One</option>
+              <option>Alfa Slab One</option><option>Oswald</option><option>Bungee</option><option>Righteous</option><option>Luckiest Guy</option><option>Permanent Marker</option><option>Pacifico</option>
               <option>Bricolage Grotesque</option>
               <option>JetBrains Mono</option>
               <option>Inter</option>
@@ -368,11 +382,23 @@
       </aside>
     </div>
 
+    <div class="render-subs" id="render-subs" hidden>
+      <div class="hint">You have <b id="render-subs-n">0</b> sub-clip(s). Each renders to its own file (uses that sub-clip's own crop · illustrations · text · stickers · trim). <span id="render-farm-note"></span></div>
+      <div class="actions" style="margin-top:8px">
+        <button id="btn-render-subs-sel" class="primary">🎬 Render selected</button>
+        <button id="btn-render-subs-all" class="ghost">Render all</button>
+        <label class="thumb-check" title="Also export a thumbnail PNG per sub-clip (uses your saved Thumbnail settings + a frame from each sub-clip)"><input type="checkbox" id="render-thumbs"> 🖼 also make thumbnail</label>
+        <span class="status" id="render-subs-status"></span>
+      </div>
+      <ul class="render-subs-list" id="render-subs-list"></ul>
+    </div>
+
     <div class="actions">
       <button class="ghost" data-go="3">← Back</button>
       <button id="btn-render" class="primary">Render Final (with Caption) →</button>
       <button id="btn-render-nocap" class="ghost" title="skip caption, fast preview">Quick preview (no caption)</button>
       <span class="status" id="rd-status"></span>
+      <span class="hint" id="render-single-note"></span>
     </div>
 
     <div class="render-result hidden" id="render-result">
@@ -401,6 +427,12 @@
       <p>Drag the time bar to pick a frame, generate an eye-catching headline (or type your own), then export a 9:16 cover (PNG).</p>
     </div>
 
+    <div class="thumb-subpick" id="thumb-subpick" hidden style="margin:-8px 0 14px">
+      <label style="font-size:12px;color:var(--text-dim)">Thumbnail for:
+        <select id="thumb-subclip" title="Pick a sub-clip — the time bar jumps to it and the PNG is named after it"></select>
+      </label>
+    </div>
+
     <div class="thumb-layout">
       <div class="thumb-stage">
         <canvas id="thumb-canvas" width="405" height="720"></canvas>
@@ -417,6 +449,16 @@
       </div>
 
       <aside class="thumb-controls">
+        <div class="thumb-sec">
+          <div class="thumb-sec-head">Background</div>
+          <div class="thumb-seg" id="thumb-layout-toggle">
+            <button class="seg active" data-layout="full">Full (1 box)</button>
+            <button class="seg" data-layout="two">2 boxes</button>
+          </div>
+          <div id="thumb-slots"></div>
+          <div class="hint">In <b>2 boxes</b>: top = a video frame (cropped to your crop box), bottom = a frame or a stock image. <b>Scene</b> slots use the live frame unless you hit <b>Capture</b>.</div>
+        </div>
+
         <div class="thumb-gen">
           <div class="thumb-gen-row">
             <button id="btn-thumb-gen" class="primary">✨ Generate headline ideas</button>
@@ -444,6 +486,18 @@
             <select id="thumb-font">
               <option>Anton</option>
               <option>Bebas Neue</option>
+              <option>Archivo Black</option>
+              <option>Poppins</option>
+              <option>Fjalla One</option>
+              <option>Bangers</option>
+              <option>Titan One</option>
+              <option>Alfa Slab One</option>
+              <option>Oswald</option>
+              <option>Bungee</option>
+              <option>Righteous</option>
+              <option>Luckiest Guy</option>
+              <option>Permanent Marker</option>
+              <option>Pacifico</option>
               <option>Bricolage Grotesque</option>
               <option>JetBrains Mono</option>
               <option>Impact</option>
@@ -472,6 +526,16 @@
           </label>
           <label class="thumb-check"><input type="checkbox" id="thumb-upper" checked> UPPERCASE</label>
           <label class="thumb-check"><input type="checkbox" id="thumb-shade" checked> Shade behind text</label>
+          <label>
+            <span>Effect</span>
+            <select id="thumb-effect" title="texture/finish applied over the whole thumbnail">
+              <option value="none">None</option>
+              <option value="crumple">Crumpled paper</option>
+              <option value="grain">Film grain</option>
+              <option value="vignette">Vignette</option>
+              <option value="crumple+vignette">Crumple + vignette</option>
+            </select>
+          </label>
         </div>
 
         <div class="actions">
@@ -546,10 +610,232 @@
     </div>
   </section>
 
+  <!-- STEP 7: SUB-CLIPS -->
+  <section class="panel hidden" id="panel-7">
+    <div class="panel-head">
+      <h1>Sub-clips</h1>
+      <p>One source → many exports. Mark a range, <b>+ Add sub-clip</b> (it snapshots the current crop · illustrations · caption). Each sub-clip can keep only its good parts (<b>Trim</b> — cut dead air / white noise). Tick the ones you want, then <b>Render selected</b>. Click a sub-clip to load it back into the editor for tweaks.</p>
+    </div>
+
+    <div class="subclip-stage-wrap">
+      <div class="source-stage source-stage-sub">
+        <video id="sub-video" playsinline></video>
+      </div>
+      <div class="video-controls">
+        <button class="ctrl-btn" id="sub-play" title="Play/Pause">▶</button>
+        <span class="time-cur" id="sub-time">0:00.0</span>
+        <span class="vc-spacer"></span>
+        <span class="time-dur" id="sub-dur">0:00.0</span>
+      </div>
+
+      <div class="sub-tl-wrap" id="sub-tl-wrap">
+        <div class="timeline" id="sub-timeline">
+          <div class="timeline-track scrub-lane">
+            <span class="timeline-label">Play</span>
+            <input type="range" id="sub-scrubber" class="scrubber tl-scrubber" min="0" max="100" step="0.05" value="0">
+          </div>
+        </div>
+        <div class="cut-lanes">
+          <div class="cut-lane">
+            <span class="cut-lane-lbl">Sub-clips</span>
+            <div class="cut-lane-track" id="subclip-track"></div>
+          </div>
+        </div>
+        <div class="timeline-cursor" id="sub-cursor"></div>
+      </div>
+
+      <div class="subclip-pv-btns">
+        <button id="btn-sub-start" class="cut-btn">⟵ Start @ playhead</button>
+        <span id="subclip-range-lbl" class="subclip-when">range: full clip</span>
+        <button id="btn-sub-end" class="cut-btn">End @ playhead ⟶</button>
+        <span class="hint">· Trim (cut dead air) is its own step →</span>
+      </div>
+
+      <div class="subclip-controls">
+        <button id="btn-sub-add" class="primary small">+ Add sub-clip</button>
+        <button id="btn-sub-update" class="ghost small" title="Save the current editor setup (crop/illustration/caption) into the selected sub-clip">⤓ Save edits to selected</button>
+        <button id="btn-sub-render-sel" class="primary small">🎬 Render selected</button>
+        <button id="btn-sub-render" class="ghost small" title="Render every sub-clip">Render all</button>
+        <span class="status" id="sub-status"></span>
+      </div>
+      <ul class="subclip-list" id="subclip-list"></ul>
+      <ul class="subclip-results" id="subclip-results"></ul>
+    </div>
+  </section>
+
+  <!-- STEP 8: TEXT & STICKERS -->
+  <section class="panel hidden" id="panel-8">
+    <div class="panel-head">
+      <h1>Text &amp; Stickers</h1>
+      <p>Burn styled text + PNG stickers over chosen time windows. Scrub below, set <b>A → B</b> at the playhead, drag bars to move/resize. The playhead, the Text bar and the Sticker bar share one synced axis.</p>
+    </div>
+
+    <div class="thumb-subpick" style="margin:-8px 0 14px">
+      <label style="font-size:12px;color:var(--text-dim)">Editing sub-clip:
+        <select id="ov-active-sub" title="Which sub-clip these text/stickers belong to"></select>
+      </label>
+    </div>
+
+    <div class="subclip-stage-wrap">
+      <div class="source-stage source-stage-sub">
+        <video id="ov-video" playsinline></video>
+      </div>
+      <div class="video-controls">
+        <button class="ctrl-btn" id="ov-play" title="Play/Pause">▶</button>
+        <span class="time-cur" id="ov-time">0:00.0</span>
+        <span class="vc-spacer"></span>
+        <span class="time-dur" id="ov-dur">0:00.0</span>
+      </div>
+
+      <div class="sub-tl-wrap" id="ov-tl-wrap">
+        <div class="timeline" id="ov-timeline">
+          <div class="timeline-track scrub-lane">
+            <span class="timeline-label">Play</span>
+            <input type="range" id="ov-scrubber" class="scrubber tl-scrubber" min="0" max="100" step="0.05" value="0">
+          </div>
+        </div>
+        <div class="cut-lanes">
+          <div class="cut-lane">
+            <span class="cut-lane-lbl" title="Styled text labels burned over a time window. Add one, type, pick font/size/color/position, set A→B.">Text</span>
+            <div class="cut-lane-track" id="ovl-track"></div>
+          </div>
+          <div class="cut-lane">
+            <span class="cut-lane-lbl" title="PNG stickers (transparency kept) over a time window. Upload, set size/opacity/position, set A→B.">Stickers</span>
+            <div class="cut-lane-track" id="stk-track"></div>
+          </div>
+        </div>
+        <div class="timeline-cursor" id="ov-cursor"></div>
+      </div>
+
+      <div class="cut-controls">
+        <span class="cut-controls-lbl">Text overlays:</span>
+        <button class="cut-btn" id="btn-ovl-add">+ Add text @ playhead</button>
+        <button class="cut-btn" id="btn-ovl-clear">Clear</button>
+        <span class="status" id="ovl-status"></span>
+      </div>
+      <div class="ovl-editor" id="ovl-editor">
+        <textarea id="ovl-text" rows="2" placeholder="Select a text bar below (or add one), then type here — Enter for a new line"></textarea>
+        <div class="ovl-row">
+          <label><span>Font</span>
+            <select id="ovl-font">
+              <option>Anton</option>
+              <option>Bebas Neue</option>
+              <option>Archivo Black</option>
+              <option>Poppins</option>
+              <option>Fjalla One</option>
+              <option>Bangers</option>
+              <option>Titan One</option>
+              <option>Alfa Slab One</option>
+              <option>Oswald</option>
+              <option>Bungee</option>
+              <option>Righteous</option>
+              <option>Luckiest Guy</option>
+              <option>Permanent Marker</option>
+              <option>Pacifico</option>
+              <option>Bricolage Grotesque</option>
+              <option>JetBrains Mono</option>
+              <option>Inter</option>
+              <option>Arial</option>
+              <option>Impact</option>
+            </select>
+          </label>
+          <label><span>Size</span><input type="number" id="ovl-size" value="56" min="12" max="200"></label>
+          <label><span>Color</span><input type="color" id="ovl-color" value="#ffffff"></label>
+          <span class="ovl-pos-wrap"><span class="ovl-lbl">Position</span>
+            <div class="ovl-grid" id="ovl-grid" title="anchor the text">
+              <button data-x="0.2" data-y="0.12">↖</button><button data-x="0.5" data-y="0.12">↑</button><button data-x="0.8" data-y="0.12">↗</button>
+              <button data-x="0.2" data-y="0.5">←</button><button data-x="0.5" data-y="0.5">•</button><button data-x="0.8" data-y="0.5">→</button>
+              <button data-x="0.2" data-y="0.88">↙</button><button data-x="0.5" data-y="0.88">↓</button><button data-x="0.8" data-y="0.88">↘</button>
+            </div>
+          </span>
+          <button class="cut-btn" id="btn-ovl-a">Set A</button>
+          <button class="cut-btn" id="btn-ovl-b">Set B</button>
+        </div>
+      </div>
+      <ol class="ovl-list" id="ovl-list"></ol>
+
+      <div class="cut-controls" style="margin-top:14px">
+        <span class="cut-controls-lbl">PNG stickers:</span>
+        <input type="file" id="stk-file" accept="image/png,image/webp,image/gif,image/jpeg" hidden>
+        <button class="cut-btn" id="btn-stk-upload">Upload PNG @ playhead</button>
+        <button class="cut-btn" id="btn-stk-clear">Clear</button>
+        <span class="status" id="stk-status"></span>
+      </div>
+      <div class="ovl-editor" id="stk-editor">
+        <div class="ovl-row">
+          <img id="stk-thumb" class="stk-thumb" alt="sticker">
+          <label><span>Size</span><input type="range" id="stk-scale" min="0.05" max="1" step="0.01" value="0.3"></label>
+          <label><span>Opacity</span><input type="range" id="stk-opacity" min="0.1" max="1" step="0.05" value="1"></label>
+          <span class="ovl-pos-wrap"><span class="ovl-lbl">Position</span>
+            <div class="ovl-grid" id="stk-grid" title="anchor the sticker">
+              <button data-x="0.15" data-y="0.12">↖</button><button data-x="0.5" data-y="0.12">↑</button><button data-x="0.85" data-y="0.12">↗</button>
+              <button data-x="0.15" data-y="0.5">←</button><button data-x="0.5" data-y="0.5">•</button><button data-x="0.85" data-y="0.5">→</button>
+              <button data-x="0.15" data-y="0.88">↙</button><button data-x="0.5" data-y="0.88">↓</button><button data-x="0.85" data-y="0.88">↘</button>
+            </div>
+          </span>
+          <button class="cut-btn" id="btn-stk-a">Set A</button>
+          <button class="cut-btn" id="btn-stk-b">Set B</button>
+        </div>
+      </div>
+      <ol class="ovl-list" id="stk-list"></ol>
+    </div>
+  </section>
+
+  <!-- STEP 9: TRIM -->
+  <section class="panel hidden" id="panel-9">
+    <div class="panel-head">
+      <h1>Trim</h1>
+      <p>Keep only the good parts — cut dead air / white noise. Pick a sub-clip, scrub, then <b>Set A → Set B</b> to mark what to KEEP (everything outside is cut, kept parts joined). Each sub-clip keeps its own trim.</p>
+    </div>
+
+    <div class="subclip-stage-wrap">
+      <div class="source-stage source-stage-sub">
+        <video id="trim-video" playsinline></video>
+      </div>
+      <div class="video-controls">
+        <button class="ctrl-btn" id="trim-play" title="Play/Pause">▶</button>
+        <span class="time-cur" id="trim-time">0:00.0</span>
+        <span class="vc-spacer"></span>
+        <span class="time-dur" id="trim-dur">0:00.0</span>
+      </div>
+
+      <div class="subclip-pv-btns">
+        <label style="font-size:12px;color:var(--text-dim)">Trim sub-clip:
+          <select id="trim-subclip" title="Pick which sub-clip to trim (its own keep-windows)"></select>
+        </label>
+      </div>
+
+      <div class="sub-tl-wrap" id="trim-tl-wrap">
+        <div class="timeline" id="trim-timeline">
+          <div class="timeline-track scrub-lane">
+            <span class="timeline-label">Play</span>
+            <input type="range" id="trim-scrubber" class="scrubber tl-scrubber" min="0" max="100" step="0.05" value="0">
+          </div>
+        </div>
+        <div class="cut-lanes">
+          <div class="cut-lane">
+            <span class="cut-lane-lbl" title="Windows to KEEP — everything outside is cut. Drag to move, edges to resize, double-click to remove.">Keep ✓</span>
+            <div class="cut-lane-track" id="trim-track"></div>
+          </div>
+        </div>
+        <div class="timeline-cursor" id="trim-cursor"></div>
+      </div>
+
+      <div class="subclip-controls">
+        <button class="cut-btn" id="btn-trim-a">⟵ Set A (start)</button>
+        <button class="cut-btn" id="btn-trim-b">Set B (end) ⟶</button>
+        <button class="cut-btn" id="btn-trim-here">+ keep ~3s here</button>
+        <button class="cut-btn" id="btn-trim-clear">Clear</button>
+        <span class="status" id="trim-status"></span>
+      </div>
+      <ol class="ovl-list" id="trim-list"></ol>
+    </div>
+  </section>
+
 </main>
 
 </div>
 
-<script src="app.js?v=20260625b"></script>
+<script src="app.js?v=20260701e"></script>
 </body>
 </html>

@@ -71,6 +71,11 @@ class PlanRequest(BaseModel):
     duration: float  # clip duration in seconds (from /api/download)
     title: str = ""
     description: str = ""
+    # Scope planning to ONE sub-clip's range (default 0/None = whole clip).
+    t_start: float = 0.0
+    t_end: Optional[float] = None
+    # Image source: 'all' (mixed) | pexels | openverse | wikimedia | unsplash | pixabay.
+    source: str = "all"
 
 
 class Candidate(BaseModel):
@@ -100,6 +105,9 @@ class PlanResponse(BaseModel):
 class SearchRequest(BaseModel):
     """Re-search one segment with a user-edited query."""
     query: str
+    # Image source: pexels | openverse | wikimedia | unsplash | pixabay.
+    # None → backend default (Pexels if keyed, else a keyless source).
+    source: Optional[str] = None
 
 
 class SearchResponse(BaseModel):
@@ -121,12 +129,63 @@ class IllustrationPick(BaseModel):
 CAPTION_FONTS = [
     "Anton",          # bundled (assets/fonts) — heavy display, TikTok default
     "Bebas Neue",     # bundled — tall condensed
+    "Archivo Black",  # bundled — heavy grotesque
+    "Poppins",        # bundled (Bold) — clean modern
+    "Fjalla One",     # bundled — condensed display
+    "Bangers",        # bundled — comic / loud
+    "Titan One",      # bundled — heavy rounded
+    "Alfa Slab One",  # bundled — heavy slab
+    "Oswald",         # bundled — condensed sans (news/sport look)
+    "Bungee",         # bundled — urban block caps
+    "Righteous",      # bundled — geometric retro
+    "Luckiest Guy",   # bundled — fun comic caps
+    "Permanent Marker",  # bundled — handwritten marker
+    "Pacifico",       # bundled — script / handwriting
     "Bricolage Grotesque",
     "JetBrains Mono",
     "Inter",
     "Arial",
     "Impact",
 ]
+
+
+class CaptionPosRange(BaseModel):
+    """A time window [start,end] (seconds, clip time) where the caption sits at
+    `pos` ('top' | 'middle' | 'bottom'). Outside every range the caption uses the
+    global caption_pos. Lets the caption move around over the clip."""
+    start: float
+    end: float
+    pos: str = "middle"
+
+
+class TextOverlay(BaseModel):
+    """A styled text label burned over the video for a time window [start,end]
+    (seconds, clip time). Positioned by fractional center (x_frac/y_frac, 0–1 of
+    the 1080×1920 frame). `font` must be one of CAPTION_FONTS (bundled .ttf burned
+    via libass fontsdir). `color` is a #RRGGBB hex. Distinct from captions: this is
+    arbitrary user text, not the transcript."""
+    text: str
+    start: float
+    end: float
+    x_frac: float = 0.5
+    y_frac: float = 0.5
+    size: int = 56
+    font: str = "Anton"
+    color: str = "#FFFFFF"
+
+
+class Sticker(BaseModel):
+    """A PNG sticker (alpha preserved) overlaid over a time window [start,end]
+    (seconds, clip time). `url` is a /temp/ uploaded image. Positioned by fractional
+    CENTER (x_frac/y_frac, 0–1 of the 1080×1920 frame); `scale` = width as a fraction
+    of the frame width (aspect kept); `opacity` 0–1."""
+    url: str
+    start: float
+    end: float
+    x_frac: float = 0.5
+    y_frac: float = 0.5
+    scale: float = 0.3
+    opacity: float = 1.0
 
 
 class KeepSegment(BaseModel):
@@ -177,7 +236,13 @@ class RenderRequest(BaseModel):
     words: list[Word] = Field(default_factory=list)
     caption_font: str = "Anton"
     caption_size: int = 64
-    caption_pos: str = "middle"   # vertical caption position: "top" | "middle" | "bottom"
+    caption_pos: str = "middle"   # default vertical caption position: "top" | "middle" | "bottom"
+    # Per-time-window caption position overrides (outside any window → caption_pos).
+    caption_pos_ranges: list[CaptionPosRange] = Field(default_factory=list)
+    # Styled text labels burned at chosen positions over chosen time windows.
+    text_overlays: list[TextOverlay] = Field(default_factory=list)
+    # PNG stickers (alpha) overlaid at chosen positions over chosen time windows.
+    stickers: list[Sticker] = Field(default_factory=list)
     cleanup: bool = False
     render_start: Optional[float] = None
     render_end: Optional[float] = None
@@ -191,6 +256,9 @@ class RenderRequest(BaseModel):
     # Multi-segment KEEP trim: only these windows survive (concatenated), the rest
     # is cut. Overrides render_start/render_end (same as clipper).
     keep_segments: list[KeepSegment] = Field(default_factory=list)
+    # Optional per-render token: ffmpeg progress is published under it so the UI can
+    # poll /api/render-progress and show a live percent (per sub-clip).
+    progress_id: Optional[str] = None
 
 
 class RenderResponse(BaseModel):
@@ -270,3 +338,5 @@ class QueueJobPatch(BaseModel):
     prompt2: Optional[str] = None
     # Per-clip top/bottom split (3, 3.5 or 4 eighths for the video slot).
     top_eighths: Optional[float] = None
+    # Full editor state JSON (sub-clips + buffer) — auto-saved so nothing is lost.
+    editor_state: Optional[str] = None
